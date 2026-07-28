@@ -7,4 +7,3 @@ pyobjc-framework-Quartz
 supabase
 python-dotenv
 spacy
-anthropic

@@ -7,7 +7,6 @@ No SQLite. No scoring. No sync logic.
 Every layer of the system — agent, database, sync worker, web app —
 uses the same Episode structure.
 """
-import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -119,7 +118,6 @@ class Episode:
 
     def close(self) -> None:
         self.ended_at = _iso_now()
-        self.summary = _llm_summary(self)
 
 
 # ── Factory ────────────────────────────────────────────────────────────────────
@@ -169,41 +167,8 @@ def _describe(obs: Observation) -> str:
     return "Screen activity detected"
 
 
-def _llm_summary(episode: Episode) -> str:
-    """
-    Generate a one-sentence time-log summary via Claude at episode close.
-    Falls back to the deterministic summary if the API is unavailable.
-    """
-    try:
-        import anthropic
-        key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not key:
-            return _build_summary(episode)
-        client = anthropic.Anthropic(api_key=key)
-        timeline = "\n".join(
-            f"- {e.timestamp}  {e.text}" for e in episode.storyline[:30]
-        )
-        msg = client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=150,
-            messages=[{
-                "role": "user",
-                "content": (
-                    "Write a single sentence (max 25 words) summarising this work session "
-                    "for a professional's time log. Be specific about the work done.\n\n"
-                    f"Episode: {episode.title}\n"
-                    f"Timeline:\n{timeline}"
-                ),
-            }],
-        )
-        return msg.content[0].text.strip()
-    except Exception as exc:
-        print(f"[episode] LLM summary failed ({exc}), using fallback")
-        return _build_summary(episode)
-
-
 def _build_summary(episode: Episode) -> str:
-    """Deterministic fallback summary built from storyline entries."""
+    """Deterministic summary built from storyline entries (used by the reporting pipeline)."""
     seen_apps: list[str] = list(dict.fromkeys(
         e.text.split(" — ")[0].split(":")[0].strip()
         for e in episode.storyline

@@ -125,11 +125,11 @@ _STRIP_EXTENSIONS = [".xlsx", ".xls", ".docx", ".doc", ".pdf", ".pptx",
 
 
 def _derive_title(obs: Observation) -> str:
-    """Derive a human-readable episode title from observation context."""
-    # Entities — most specific signal (regex IDs > NER names)
-    if obs.entities:
-        return obs.entities[0]
-
+    """
+    Derive the initial episode title from the opening observation.
+    Entity-based title refinement happens in Episode.record_observation()
+    as the entity_counts frequency map accumulates across observations.
+    """
     # File path → filename without extension
     if obs.file_path:
         from pathlib import Path

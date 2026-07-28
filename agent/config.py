@@ -23,6 +23,3 @@ CONTEXT_SHIFT_THRESHOLD = 0.6       # combined signal score → new episode
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")   # service role key
 STORAGE_BUCKET = "screenshots"
-
-# ── LLM (episode summary only) ────────────────────────────────────────────────
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")

@@ -1,0 +1,8 @@
+mss
+Pillow
+numpy
+pyobjc-framework-Cocoa
+pyobjc-framework-Vision
+pyobjc-framework-Quartz
+supabase
+python-dotenv

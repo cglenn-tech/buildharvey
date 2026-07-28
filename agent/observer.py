@@ -18,6 +18,7 @@ from typing import Optional
 
 import capture
 import context as ctx_module
+import entities as entities_mod
 import ocr
 
 
@@ -31,6 +32,7 @@ class Observation:
     window_title: str       # frontmost window title   e.g. "Johnson Holdings Q4.xlsx"
     browser_url: str        # active URL if a browser is frontmost, else ""
     file_path: str          # open document path if available, else ""
+    entities: list[str] = None  # named entities and structured IDs extracted from this frame
 
 
 def observe(prev_frame_path: Optional[Path], temp_path: Path) -> Optional[Observation]:
@@ -49,6 +51,7 @@ def observe(prev_frame_path: Optional[Path], temp_path: Path) -> Optional[Observ
 
     ctx = ctx_module.get_context()
     text = ocr.extract_text(temp_path)
+    found_entities = entities_mod.extract(text, ctx.window_title, ctx.file_path)
 
     return Observation(
         timestamp=_iso_now(),
@@ -58,6 +61,7 @@ def observe(prev_frame_path: Optional[Path], temp_path: Path) -> Optional[Observ
         window_title=ctx.window_title,
         browser_url=ctx.browser_url,
         file_path=ctx.file_path,
+        entities=found_entities,
     )
 
 

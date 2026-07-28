@@ -70,37 +70,43 @@ class EpisodeEngine:
         ep = self.active
         score = 0.0
 
-        # Hard rule: inactivity (shouldn't normally reach here, but belt-and-suspenders)
+        # Hard rule: inactivity (belt-and-suspenders; check_inactivity runs separately)
         if now - ep.last_activity_at > config.INACTIVITY_TIMEOUT_SECONDS:
             return True
 
-        # Browser URL domain changed
-        if obs.browser_url and ep.recent_ocr_texts:
-            from urllib.parse import urlparse
-            new_domain = urlparse(obs.browser_url).netloc
-            # Compare against the last browser_url stored in OCR context proxy
-            # (full browser URL tracking could be added; for now use app signal)
+        ep_entities = set(ep.entity_counts.keys())
+        obs_entities = set(obs.entities or [])
 
-        # Signal 1 — application changed (weight 0.45)
+        # Signal 1 — entity continuity (primary, weight 0.50)
+        # If both frames have named entities, entity overlap is decisive.
+        if ep_entities and obs_entities:
+            if ep_entities & obs_entities:
+                # Same work entity detected → keep episode alive regardless of app/window
+                return False
+            else:
+                # Entities present but no overlap → strong context shift signal
+                score += 0.50
+
+        # Signal 2 — application changed (weight 0.30)
         if ep.dominant_app and obs.app and obs.app != ep.dominant_app:
-            score += 0.45
+            score += 0.30
 
-        # Signal 2 — window title dissimilar (weight 0.30)
+        # Signal 3 — window title dissimilar (weight 0.20)
         if obs.window_title and ep.recent_window_titles:
             recent = _word_set(" ".join(ep.recent_window_titles[-5:]))
             current = _word_set(obs.window_title)
             if _jaccard(recent, current) < 0.15:
-                score += 0.30
+                score += 0.20
 
-        # Signal 3 — OCR content dissimilar (weight 0.25)
+        # Signal 4 — OCR content dissimilar (weight 0.10)
         if obs.extracted_text and ep.recent_ocr_texts:
             recent = _word_set(" ".join(ep.recent_ocr_texts[-3:]))
             current = _word_set(obs.extracted_text)
             if _jaccard(recent, current) < 0.10:
-                score += 0.25
+                score += 0.10
 
         if score >= config.CONTEXT_SHIFT_THRESHOLD:
-            print(f"[engine] context shift score={score:.2f}")
+            print(f"[engine] context shift score={score:.2f} ep_ents={len(ep_entities)} obs_ents={len(obs_entities)}")
             return True
 
         return False
@@ -120,7 +126,11 @@ _STRIP_EXTENSIONS = [".xlsx", ".xls", ".docx", ".doc", ".pdf", ".pptx",
 
 def _derive_title(obs: Observation) -> str:
     """Derive a human-readable episode title from observation context."""
-    # File path → filename without extension is best signal
+    # Entities — most specific signal (regex IDs > NER names)
+    if obs.entities:
+        return obs.entities[0]
+
+    # File path → filename without extension
     if obs.file_path:
         from pathlib import Path
         stem = Path(obs.file_path).stem

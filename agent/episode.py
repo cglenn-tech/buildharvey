@@ -17,6 +17,10 @@ import entities as entities_mod
 from observer import Observation
 
 
+def _iso_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
 @dataclass
 class StorylineEntry:
     timestamp: str  # HH:MM
@@ -137,10 +141,6 @@ def new_episode(title: str, app_name: str, window_title: str) -> Episode:
 
 
 # ── Private helpers ────────────────────────────────────────────────────────────
-
-def _iso_now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
 
 def _describe(obs: Observation) -> str:
     """One-line storyline description from the richest available context signal."""

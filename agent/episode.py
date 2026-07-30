@@ -1,189 +1,129 @@
 """
 Episode data model.
 
-This file contains only dataclasses and the canonical to_dict() representation.
-No SQLite. No scoring. No sync logic.
+An Episode represents exactly one case (work subject).
+case_name is the primary identifier.
 
-Every layer of the system — agent, database, sync worker, web app —
-uses the same Episode structure.
+Lifecycle:
+  1. Episode opens when a case name is first detected.
+  2. Observations accumulate in a raw buffer (in memory only).
+  3. Episode closes when the case name changes or inactivity fires.
+  4. The finalizer processes the buffer → key_observations.
+  5. The finalized Episode is persisted and synced.
+
+Episodes are structured memory for the report generator.
+They are not reports. They are not displayed to users as-is.
 """
 import time
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
-
-import entities as entities_mod
-from observer import Observation
 
 
 def _iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+# ── Raw observation (in-memory buffer, never persisted) ───────────────────────
+
 @dataclass
-class StorylineEntry:
+class RawObservation:
+    """Lightweight context snapshot accumulated while an episode is open."""
+    timestamp: str      # HH:MM
+    app: str
+    window_title: str
+    browser_url: str
+    file_path: str
+    entities: list[str]
+
+
+# ── Finalized observation (persisted and sent to LLM) ─────────────────────────
+
+@dataclass
+class KeyObservation:
     timestamp: str  # HH:MM
-    text: str
+    text: str       # "Reviewed appraisal report"
 
     def to_dict(self) -> dict:
         return {"timestamp": self.timestamp, "text": self.text}
 
 
-@dataclass
-class Screenshot:
-    id: str
-    timestamp: str      # HH:MM
-    path: str           # local file path (set immediately)
-    storage_url: str    # Supabase Storage URL (filled in by background sync worker)
-    extracted_text: str
-
-    def to_dict(self) -> dict:
-        return {
-            "id": self.id,
-            "timestamp": self.timestamp,
-            "path": self.path,
-            "storageUrl": self.storage_url,
-            "extractedText": self.extracted_text,
-        }
-
+# ── Episode ───────────────────────────────────────────────────────────────────
 
 @dataclass
 class Episode:
     id: str
-    title: str
+    case_name: str
     started_at: str
     ended_at: Optional[str]
-    summary: str
-    storyline: list[StorylineEntry] = field(default_factory=list)
-    screenshots: list[Screenshot] = field(default_factory=list)
     created_at: str = field(default_factory=_iso_now)
 
-    # ── Runtime tracking (not persisted to Supabase) ──────────────────────────
+    # Finalized — set by finalizer.finalize() after close()
+    key_observations: list[KeyObservation] = field(default_factory=list)
+
+    # In-memory buffer — cleared after finalization
+    _raw_observations: list[RawObservation] = field(default_factory=list)
+
+    # Runtime — not persisted
     last_activity_at: float = field(default_factory=time.time)
-    dominant_app: str = ""
-    recent_window_titles: list[str] = field(default_factory=list)
-    recent_ocr_texts: list[str] = field(default_factory=list)
-    entity_counts: dict[str, int] = field(default_factory=dict)  # entity → observation count
+    entity_counts: dict[str, int] = field(default_factory=dict)
 
-    # ── Public interface ──────────────────────────────────────────────────────
+    @property
+    def duration_minutes(self) -> float:
+        end_str = self.ended_at or _iso_now()
+        try:
+            start = time.mktime(time.strptime(self.started_at, "%Y-%m-%dT%H:%M:%SZ"))
+            end = time.mktime(time.strptime(end_str, "%Y-%m-%dT%H:%M:%SZ"))
+            return round((end - start) / 60, 2)
+        except Exception:
+            return 0.0
 
-    def to_dict(self) -> dict:
+    def add_observation(self, obs) -> None:
         """
-        Canonical Episode representation.
-        Identical shape across agent, SQLite, Supabase, and web app.
+        Buffer one Observation for later finalization.
+        Updates entity tracking and last-activity time.
+        Only the primary entity (entities[0]) is counted — tracking all entities
+        caused background tabs to contaminate entity_counts and prevent episode closes.
         """
-        return {
-            "id": self.id,
-            "title": self.title,
-            "started_at": self.started_at,
-            "ended_at": self.ended_at or _iso_now(),
-            "summary": self.summary,
-            "storyline": [e.to_dict() for e in self.storyline],
-            "screenshots": [s.to_dict() for s in self.screenshots],
-            "created_at": self.created_at,
-        }
-
-    def record_observation(self, screenshot_id: str, path: Path, obs: Observation) -> Screenshot:
-        """
-        Attach one Observation to this episode.
-        Creates both a Screenshot record and a Storyline entry.
-        storage_url starts empty — the sync worker fills it in after upload.
-        """
-        ts = time.strftime("%H:%M")
-
-        screenshot = Screenshot(
-            id=screenshot_id,
-            timestamp=ts,
-            path=str(path),
-            storage_url="",
-            extracted_text=obs.extracted_text,
-        )
-        self.screenshots.append(screenshot)
-        self.storyline.append(StorylineEntry(timestamp=ts, text=_describe(obs)))
-
-        # Update runtime context so the engine can score future observations
-        self.last_activity_at = time.time()
-        self.dominant_app = obs.app
-        if obs.window_title:
-            self.recent_window_titles.append(obs.window_title)
-        if obs.extracted_text:
-            self.recent_ocr_texts.append(obs.extracted_text[:500])
-
-        # Entity tracking — accumulate counts and drive the episode title
         if obs.entities:
-            for ent in obs.entities:
-                self.entity_counts[ent] = self.entity_counts.get(ent, 0) + 1
-            dom = entities_mod.dominant(self.entity_counts)
-            if dom:
-                self.title = dom
+            primary = obs.entities[0]
+            self.entity_counts[primary] = self.entity_counts.get(primary, 0) + 1
 
-        return screenshot
+        self._raw_observations.append(RawObservation(
+            timestamp=time.strftime("%H:%M"),
+            app=obs.app,
+            window_title=obs.window_title,
+            browser_url=obs.browser_url,
+            file_path=obs.file_path,
+            entities=list(obs.entities or []),
+        ))
+        self.last_activity_at = time.time()
 
     def close(self) -> None:
         self.ended_at = _iso_now()
 
+    def to_dict(self) -> dict:
+        """
+        Canonical representation sent to Supabase and consumed by the report generator.
+        Contains only finalized key observations — no raw data, no images.
+        """
+        return {
+            "id": self.id,
+            "case_name": self.case_name,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at or _iso_now(),
+            "duration_minutes": self.duration_minutes,
+            "key_observations": [o.to_dict() for o in self.key_observations],
+            "created_at": self.created_at,
+        }
 
-# ── Factory ────────────────────────────────────────────────────────────────────
 
-def new_episode(title: str, app_name: str, window_title: str) -> Episode:
-    ep = Episode(
+# ── Factory ───────────────────────────────────────────────────────────────────
+
+def new_episode(case_name: str) -> Episode:
+    return Episode(
         id=str(uuid.uuid4()),
-        title=title,
+        case_name=case_name or "Administrative",
         started_at=_iso_now(),
         ended_at=None,
-        summary="",
-        dominant_app=app_name,
     )
-    if window_title:
-        ep.recent_window_titles.append(window_title)
-    return ep
-
-
-# ── Private helpers ────────────────────────────────────────────────────────────
-
-def _describe(obs: Observation) -> str:
-    """One-line storyline description from the richest available context signal."""
-    if obs.browser_url:
-        try:
-            from urllib.parse import urlparse
-            domain = urlparse(obs.browser_url).netloc.removeprefix("www.")
-            return f"{obs.app} — {domain}" if domain else obs.app
-        except Exception:
-            pass
-    if obs.file_path:
-        filename = Path(obs.file_path).name
-        return f"{obs.app} — {filename}" if filename else obs.app
-    if obs.window_title and obs.app:
-        return f"{obs.app} — {obs.window_title}"
-    if obs.window_title:
-        return obs.window_title
-    if obs.app:
-        first_line = next(
-            (ln.strip() for ln in obs.extracted_text.splitlines() if len(ln.strip()) > 10),
-            "",
-        )
-        return f"{obs.app}: {first_line[:80]}" if first_line else obs.app
-    return "Screen activity detected"
-
-
-def _build_summary(episode: Episode) -> str:
-    """Deterministic summary built from storyline entries (used by the reporting pipeline)."""
-    seen_apps: list[str] = list(dict.fromkeys(
-        e.text.split(" — ")[0].split(":")[0].strip()
-        for e in episode.storyline
-        if e.text and e.text != "Screen activity detected"
-    ))
-
-    try:
-        start = time.strptime(episode.started_at, "%Y-%m-%dT%H:%M:%SZ")
-        duration_min = round((time.time() - time.mktime(start)) / 60)
-    except Exception:
-        duration_min = 0
-
-    if not seen_apps:
-        return f"Session lasted {duration_min} min." if duration_min else ""
-
-    app_list = ", ".join(seen_apps[:4])
-    more = " and more" if len(seen_apps) > 4 else ""
-    return f"Worked for {duration_min} min using {app_list}{more}."

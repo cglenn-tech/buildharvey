@@ -56,34 +56,48 @@ def _get_nlp():
 def extract(ocr_text: str, window_title: str = "", file_path: str = "") -> list[str]:
     """
     Extract entities from OCR text and context signals.
-    Returns a deduplicated list ordered by specificity.
+    Returns a deduplicated list ordered by specificity:
+      1. Structured identifiers (Claim #, Case #, Matter # …) — most reliable
+      2. File stem — strong document signal
+      3. spaCy NER (ORG, PERSON, PRODUCT …) — least precise
     """
-    found: set[str] = set()
+    structured: list[str] = []
+    seen: set[str] = set()
 
-    # 1. Structured identifiers — most reliable for professional work
+    def _add(val: str, bucket: list) -> None:
+        v = " ".join(val.split())  # collapse all whitespace including newlines
+        if len(v) > 2 and v not in seen:
+            seen.add(v)
+            bucket.append(v)
+
+    # 1. Structured identifiers — highest precision
     for pattern in _COMPILED:
         for match in pattern.finditer(ocr_text):
-            val = match.group().strip()
-            if len(val) > 3:
-                found.add(val)
+            _add(match.group(), structured)
 
-    # 2. spaCy NER
-    nlp = _get_nlp()
-    if nlp and ocr_text.strip():
-        doc = nlp(ocr_text[:5000])  # cap to keep the loop fast
-        for ent in doc.ents:
-            if ent.label_ in _ENTITY_TYPES:
-                val = ent.text.strip()
-                if len(val) > 2 and not _is_noise(val):
-                    found.add(val)
-
-    # 3. File stem — document title is a strong entity signal
+    # 2. File stem — reliable document context
+    file_entities: list[str] = []
     if file_path:
         stem = Path(file_path).stem.strip()
         if len(stem) > 3 and not _is_noise(stem):
-            found.add(stem)
+            _add(stem, file_entities)
 
-    return list(found)
+    # 3. spaCy NER — least precise, lowest priority
+    ner_entities: list[str] = []
+    nlp = _get_nlp()
+    if nlp and ocr_text.strip():
+        doc = nlp(ocr_text[:5000])
+        for ent in doc.ents:
+            if ent.label_ not in _ENTITY_TYPES:
+                continue
+            val = " ".join(ent.text.split())
+            # PERSON must be at least two words to be a useful case identifier
+            if ent.label_ == "PERSON" and len(val.split()) < 2:
+                continue
+            if not _is_noise(val):
+                _add(val, ner_entities)
+
+    return structured + file_entities + ner_entities
 
 
 def dominant(entity_counts: dict[str, int]) -> Optional[str]:
@@ -106,4 +120,14 @@ _NOISE_WORDS = {
 
 
 def _is_noise(text: str) -> bool:
-    return text.lower() in _NOISE_WORDS or len(text) < 3
+    if len(text) < 3:
+        return True
+    if text.lower() in _NOISE_WORDS:
+        return True
+    # All-caps single words are typically UI chrome (buttons, labels, headings)
+    if text.isupper() and " " not in text:
+        return True
+    # Possessives like "Chas Glenn's" are system strings, not case names
+    if text.endswith("'s") or text.endswith("\u2019s"):
+        return True
+    return False

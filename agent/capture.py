@@ -1,6 +1,6 @@
 """
 Screen capture and frame comparison.
-No episode logic. No OCR. Just pixels.
+Frames are temporary processing artifacts — never persisted.
 """
 from pathlib import Path
 
@@ -15,31 +15,25 @@ import config
 def capture_screen(output_path: Path) -> None:
     """Capture the primary monitor and write to output_path as PNG."""
     with mss.mss() as sct:
-        monitor = sct.monitors[1]  # index 0 = all monitors combined; 1 = primary
+        monitor = sct.monitors[1]   # 0 = all monitors combined; 1 = primary
         frame = sct.grab(monitor)
         mss.tools.to_png(frame.rgb, frame.size, output=str(output_path))
 
 
 def image_changed(path_a: Path, path_b: Path) -> bool:
+    """Return True if the two frames differ meaningfully."""
+    return diff_score(path_a, path_b) > config.DIFF_THRESHOLD
+
+
+def diff_score(path_a: Path, path_b: Path) -> float:
     """
-    Return True if the two frames differ meaningfully.
-    Uses grayscale thumbnail diff — cheap, ~1ms per comparison.
+    Return the fraction of pixels that differ between two frames (0–1).
+    Uses grayscale thumbnail comparison — cheap, ~1ms.
+    Returns 1.0 on error (treat as changed).
     """
     try:
         a = np.array(Image.open(path_a).convert("L").resize(config.DIFF_RESIZE)).astype(int)
         b = np.array(Image.open(path_b).convert("L").resize(config.DIFF_RESIZE)).astype(int)
-        changed_pixels = (np.abs(a - b) > 30).sum() / a.size
-        return changed_pixels > config.DIFF_THRESHOLD
+        return float((np.abs(a - b) > 30).sum() / a.size)
     except Exception:
-        return True  # on any error, treat as changed to avoid silently dropping frames
-
-
-def screenshot_path(episode_id: str, screenshot_id: str) -> Path:
-    """
-    Permanent storage path for a screenshot.
-    The screenshot_id matches what is used in Supabase Storage,
-    so local path and remote path always refer to the same capture.
-    """
-    dest = config.SCREENSHOTS_DIR / episode_id
-    dest.mkdir(parents=True, exist_ok=True)
-    return dest / f"{screenshot_id}.png"
+        return 1.0

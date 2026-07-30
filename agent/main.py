@@ -1,21 +1,22 @@
 """
-BuildHarvey Desktop Agent — main loop.
+BuildHarvey Desktop Agent.
 
 Run:  python main.py
+
+Loop:
+  1. Capture screen → extract context → build Observation (image discarded).
+  2. Engine decides: continue current episode or close and open a new one.
+  3. On close: finalize → persist to SQLite → enqueue Supabase sync.
 """
-import shutil
 import time
 import traceback
-import uuid
-from pathlib import Path
-from typing import Optional
 
 from dotenv import load_dotenv
 load_dotenv()
 
 import config
-import capture
 import database
+import finalizer
 import observer
 import sync
 from episode import Episode
@@ -24,69 +25,62 @@ from episode_engine import EpisodeEngine
 
 def main() -> None:
     print("[agent] BuildHarvey starting")
-    print(f"[agent] db          {config.DB_PATH}")
-    print(f"[agent] screenshots {config.SCREENSHOTS_DIR}")
+    print(f"[agent] db {config.DB_PATH}")
 
     conn = database.connect()
     engine = EpisodeEngine()
     sync.start()
 
-    prev_frame: Optional[Path] = None
-
     while True:
         try:
-            prev_frame = _cycle(conn, engine, prev_frame)
+            _cycle(conn, engine)
         except KeyboardInterrupt:
             print("\n[agent] shutting down")
-            closed = engine.check_inactivity(time.time() - config.INACTIVITY_TIMEOUT_SECONDS - 1)
-            if closed:
-                database.save_episode(conn, closed)
-                sync.enqueue_episode(closed.to_dict())
+            _close_and_save(conn, engine.active)
             break
         except Exception:
             traceback.print_exc()
-
         time.sleep(config.CAPTURE_INTERVAL_SECONDS)
 
 
-def _cycle(conn, engine: EpisodeEngine, prev_frame: Optional[Path]) -> Optional[Path]:
+def _cycle(conn, engine: EpisodeEngine) -> None:
     now = time.time()
-
-    # ── Observe ───────────────────────────────────────────────────────────────
-    obs = observer.observe(prev_frame, config.TEMP_FRAME_PATH)
+    obs = observer.observe()
 
     if obs is None:
-        # No change — only check inactivity
         closed = engine.check_inactivity(now)
         if closed:
-            database.save_episode(conn, closed)
-            sync.enqueue_episode(closed.to_dict())
-        return prev_frame
+            _close_and_save(conn, closed)
+        return
 
-    print(f"[agent] {obs.app!r} | {obs.window_title!r}")
+    print(f"[agent] {obs.app!r} | {obs.window_title!r} | entities={obs.entities}")
 
-    # ── Engine decides episode boundary ───────────────────────────────────────
     result = engine.ingest(obs, now)
+    result.active_episode.add_observation(obs)
 
-    # ── Copy frame to permanent location (episode_id now known) ──────────────
-    screenshot_id = str(uuid.uuid4())
-    dest = capture.screenshot_path(result.active_episode.id, screenshot_id)
-    shutil.copy2(config.TEMP_FRAME_PATH, dest)
-
-    # ── Attach observation to episode ─────────────────────────────────────────
-    result.active_episode.record_observation(screenshot_id, dest, obs)
-
-    # ── SQLite first, always ──────────────────────────────────────────────────
-    database.save_episode(conn, result.active_episode)
     if result.closed_episode:
-        database.save_episode(conn, result.closed_episode)
+        _close_and_save(conn, result.closed_episode)
 
-    # ── Enqueue async sync (never blocks) ────────────────────────────────────
-    sync.enqueue_screenshot(result.active_episode.id, screenshot_id, dest)
-    if result.closed_episode:
-        sync.enqueue_episode(result.closed_episode.to_dict())
 
-    return dest
+def _close_and_save(conn, episode: Episode) -> None:
+    """Finalize a closed episode, discard if too short, otherwise persist and sync."""
+    if episode is None:
+        return
+    finalizer.finalize(episode)
+
+    if episode.duration_minutes < config.MIN_EPISODE_DURATION_MINUTES:
+        print(
+            f"[agent] discarded '{episode.case_name}' "
+            f"({episode.duration_minutes:.1f}min — below minimum)"
+        )
+        return
+
+    database.save_episode(conn, episode)
+    sync.enqueue_episode(episode.to_dict())
+    print(
+        f"[agent] saved '{episode.case_name}' "
+        f"({episode.duration_minutes:.1f}min, {len(episode.key_observations)} observations)"
+    )
 
 
 if __name__ == "__main__":

@@ -33,6 +33,9 @@ MAX_KEY_OBSERVATIONS = 8               # max observations stored per episode
 # ── Anthropic ─────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 OBSERVATION_MODEL = "claude-haiku-4-5"   # fast model for per-episode finalization
+VISION_MODEL = os.environ.get("VISION_MODEL", OBSERVATION_MODEL)
+# Per-screenshot live analysis model. Default: same as OBSERVATION_MODEL.
+# Vision analysis is ~512 output tokens. Use haiku for cost efficiency.
 
 # Max screenshots passed to Claude Vision per episode.
 # Screenshots are subsampled evenly if more were captured.

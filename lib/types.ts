@@ -11,6 +11,7 @@ export type Episode = {
   duration_minutes: number;
   key_observations: KeyObservation[];
   created_at: string;
+  is_reportable?: boolean;
 };
 
 // Season is a client-side grouping — never stored in the backend.

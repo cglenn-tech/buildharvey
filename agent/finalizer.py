@@ -3,12 +3,13 @@ Episode Finalizer.
 
 Runs once when an episode closes, before it is persisted.
 
-Responsibilities:
-  - Deduplicate consecutive identical contexts
-  - Generate rich key observations via Claude Vision (screenshots as primary evidence)
-  - Fall back to text-only LLM summary, then to templates if unavailable
-  - Cap at MAX_KEY_OBSERVATIONS
-  - Delete all saved screenshots after finalization
+Preferred path: synthesize from accumulated ScreenshotEvidence (text-only call —
+cheap, since Claude already analyzed each screenshot live).
+
+Fallback paths (when no _evidence exists):
+  1. Vision call on screenshots in _raw_observations
+  2. Text-only call on metadata from _raw_observations
+  3. Template fallback when no API key configured
 
 Core philosophy: produce observations that read like an executive assistant
 summarized the work — not browser history. Synthesize. Connect. Reconstruct.
@@ -19,93 +20,118 @@ from pathlib import Path
 
 import config
 import observations as obs_mod
-from episode import Episode, KeyObservation, RawObservation
+from episode import Episode, KeyObservation, RawObservation, ScreenshotEvidence
 
 
 def finalize(episode: Episode) -> None:
     """
     Process a closed episode in place.
-    Sets episode.key_observations from the raw buffer, then clears the buffer.
+    Sets episode.key_observations, then clears all buffers.
     Screenshots are always deleted regardless of success or failure.
     """
-    raw = episode._raw_observations
-    if not raw:
-        return
-
-    deduped = _deduplicate(raw)
-
     try:
-        key_obs = _llm_observations(episode, deduped) if config.ANTHROPIC_API_KEY else []
-        if not key_obs:
-            key_obs = _template_observations(deduped)
+        key_obs = _generate_observations(episode)
         episode.key_observations = key_obs
     finally:
-        _cleanup_screenshots(raw)
+        _cleanup_screenshots(episode._raw_observations)
         episode._raw_observations = []
+        # Do not clear _evidence — the caller may inspect it before discard
 
 
-# ── LLM-based observation generation ──────────────────────────────────────────
+def _generate_observations(episode: Episode) -> list[KeyObservation]:
+    if not config.ANTHROPIC_API_KEY:
+        return _template_observations(episode._raw_observations)
 
-def _llm_observations(episode: Episode, raw: list[RawObservation]) -> list[KeyObservation]:
-    """
-    Use Claude to produce rich narrative observations.
-
-    Prefers vision-based analysis when screenshots are available.
-    Falls back to text-only metadata when no screenshots exist.
-    """
     try:
         import anthropic
     except ImportError:
-        return []
+        return _template_observations(episode._raw_observations)
 
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    screenshot_paths = _select_screenshots(raw)
 
     try:
+        if episode._evidence:
+            # Primary path: synthesize from pre-analyzed structured evidence (no images)
+            result = _synthesize_from_evidence(client, episode)
+            if result:
+                return result
+
+        # Fallback: vision or text call on raw observations
+        raw = episode._raw_observations
+        if not raw:
+            return []
+
+        deduped = _deduplicate(raw)
+        screenshot_paths = _select_screenshots(deduped)
+
         if screenshot_paths:
-            return _vision_observations(client, episode, raw, screenshot_paths)
+            result = _vision_observations(client, episode, deduped, screenshot_paths)
         else:
-            return _text_observations(client, episode, raw)
+            result = _text_observations(client, episode, deduped)
+
+        return result or _template_observations(deduped)
+
     except Exception as e:
         print(f"[finalizer] LLM observation failed: {e}")
-        return []
+        return _template_observations(episode._raw_observations)
 
 
-def _select_screenshots(raw: list[RawObservation]) -> list[str]:
+# ── Primary: synthesize from ScreenshotEvidence ───────────────────────────────
+
+def _synthesize_from_evidence(
+    client,
+    episode: Episode,
+) -> list[KeyObservation]:
     """
-    Return up to MAX_VISION_SCREENSHOTS screenshot paths, evenly distributed
-    across the episode so we get coverage from start to end.
+    Synthesize key observations from pre-analyzed ScreenshotEvidence.
+    This is a cheap text-only call — no images needed, Claude already analyzed them.
     """
-    paths = [r.screenshot_path for r in raw if r.screenshot_path]
-    if not paths:
-        return []
+    evidence_text = _format_evidence(episode._evidence)
+    duration = episode.duration_minutes
 
-    n = config.MAX_VISION_SCREENSHOTS
-    if len(paths) <= n:
-        return paths
+    prompt = (
+        f"You are an experienced executive assistant synthesizing a work session "
+        f"from structured analysis notes.\n\n"
+        f"Work subject: {episode.case_name}\n"
+        f"Objective: {episode._objective}\n"
+        f"Session: {episode.started_at} → {episode.ended_at} ({duration:.0f} minutes)\n\n"
+        f"The following are structured observations from {len(episode._evidence)} "
+        f"screenshots analyzed during this session:\n\n"
+        f"{evidence_text}\n\n"
+        + _synthesis_instructions(config.MAX_KEY_OBSERVATIONS)
+    )
 
-    indices = [int(round(i * (len(paths) - 1) / (n - 1))) for i in range(n)]
-    return [paths[i] for i in indices]
+    response = client.messages.create(
+        model=config.OBSERVATION_MODEL,
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    return _parse_response(response.content[0].text)
 
 
-def _activity_log(raw: list[RawObservation]) -> str:
-    """Format raw observations as a compact activity log for Claude context."""
+def _format_evidence(evidence_list: list[ScreenshotEvidence]) -> str:
+    """Format ScreenshotEvidence records as structured text for the synthesis prompt."""
     lines = []
-    for r in raw:
-        parts = [r.timestamp]
-        if r.app:
-            parts.append(r.app)
-        if r.window_title:
-            parts.append(f'"{r.window_title}"')
-        if r.browser_url:
-            parts.append(r.browser_url)
-        if r.file_path:
-            parts.append(r.file_path)
-        if r.entities:
-            parts.append("entities: " + ", ".join(r.entities[:4]))
-        lines.append(" | ".join(parts))
+    for i, ev in enumerate(evidence_list, 1):
+        lines.append(f"[{i}] {ev.timestamp} | {ev.app_context}")
+        lines.append(f"  Activity: {ev.activity_description}")
+        lines.append(f"  Objective: {ev.objective}")
+        if ev.actions:
+            lines.append(f"  Actions: {'; '.join(ev.actions)}")
+        if ev.entities:
+            entity_strs = [
+                f"{e.get('name','?')} ({e.get('type','?')}, {e.get('evidence_strength','?')})"
+                for e in ev.entities
+            ]
+            lines.append(f"  Entities: {', '.join(entity_strs)}")
+        if ev.supporting_evidence:
+            lines.append(f"  Evidence: {'; '.join(ev.supporting_evidence)}")
+        lines.append("")
     return "\n".join(lines)
 
+
+# ── Fallback: vision observations ─────────────────────────────────────────────
 
 def _vision_observations(
     client,
@@ -115,10 +141,7 @@ def _vision_observations(
 ) -> list[KeyObservation]:
     """
     Build a multimodal Claude Vision call.
-
-    Screenshots are the primary evidence of what work occurred.
-    Metadata is supporting context for grounding the analysis.
-    The prompt asks Claude to synthesize and reconstruct — not enumerate.
+    Screenshots are the primary evidence; metadata is supporting context.
     """
     path_to_raw: dict[str, RawObservation] = {}
     for r in raw:
@@ -144,7 +167,7 @@ def _vision_observations(
             f"Use them as your primary evidence.\n\n"
             f"Before you write, reason through:\n"
             f"1. What was the user actually trying to accomplish overall?\n"
-            f"2. What are the distinct work threads? (e.g., 'drafting X' vs 'researching Y')\n"
+            f"2. What are the distinct work threads?\n"
             f"3. Does anything appear later in the session that explains earlier activity?\n"
             f"4. Can multiple related observations be synthesized into one clear memory?\n"
         ),
@@ -205,10 +228,7 @@ def _text_observations(
     episode: Episode,
     raw: list[RawObservation],
 ) -> list[KeyObservation]:
-    """
-    Text-only Claude call when no screenshots are available.
-    Same synthesis-first philosophy — reconstruct work, not navigation.
-    """
+    """Text-only Claude call when no screenshots are available."""
     log = _activity_log(raw)
     duration = episode.duration_minutes
 
@@ -223,8 +243,7 @@ def _text_observations(
         f"Before you write, reason through:\n"
         f"1. What was the user actually trying to accomplish overall?\n"
         f"2. What are the distinct work threads?\n"
-        f"3. Does anything later in the log explain earlier activity? "
-        f"(A name or project appearing mid-session often clarifies what came before.)\n"
+        f"3. Does anything later in the log explain earlier activity?\n"
         f"4. Which entries can be synthesized into one meaningful memory?\n\n"
         + _synthesis_instructions(config.MAX_KEY_OBSERVATIONS)
     )
@@ -239,10 +258,7 @@ def _text_observations(
 
 
 def _synthesis_instructions(max_obs: int) -> str:
-    """
-    The core instruction block telling Claude how to produce observations.
-    Shared between vision and text-only prompts.
-    """
+    """Core instruction block shared between all LLM prompts."""
     return (
         f"\nWrite up to {max_obs} observations that reconstruct the actual work. "
         f"These will be read as memories one week later.\n\n"
@@ -284,6 +300,41 @@ def _parse_response(text: str) -> list[KeyObservation]:
         if isinstance(d, dict) and d.get("timestamp") and d.get("text")
     ]
     return result[: config.MAX_KEY_OBSERVATIONS]
+
+
+# ── Screenshot selection ───────────────────────────────────────────────────────
+
+def _select_screenshots(raw: list[RawObservation]) -> list[str]:
+    """Return up to MAX_VISION_SCREENSHOTS screenshot paths, evenly distributed."""
+    paths = [r.screenshot_path for r in raw if r.screenshot_path]
+    if not paths:
+        return []
+    n = config.MAX_VISION_SCREENSHOTS
+    if len(paths) <= n:
+        return paths
+    indices = [int(round(i * (len(paths) - 1) / (n - 1))) for i in range(n)]
+    return [paths[i] for i in indices]
+
+
+# ── Activity log ──────────────────────────────────────────────────────────────
+
+def _activity_log(raw: list[RawObservation]) -> str:
+    """Format raw observations as a compact activity log for Claude context."""
+    lines = []
+    for r in raw:
+        parts = [r.timestamp]
+        if r.app:
+            parts.append(r.app)
+        if r.window_title:
+            parts.append(f'"{r.window_title}"')
+        if r.browser_url:
+            parts.append(r.browser_url)
+        if r.file_path:
+            parts.append(r.file_path)
+        if r.entities:
+            parts.append("entities: " + ", ".join(r.entities[:4]))
+        lines.append(" | ".join(parts))
+    return "\n".join(lines)
 
 
 # ── Template fallback ──────────────────────────────────────────────────────────

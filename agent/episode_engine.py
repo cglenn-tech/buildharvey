@@ -1,119 +1,245 @@
 """
-Episode Engine — case-name driven boundaries.
+Episode Engine — Claude-first state machine.
 
-Rule: one Episode = one Case.
+State machine:
+  IDLE → ACTIVE → TRANSITIONING → ACTIVE (or IDLE on inactivity)
 
-An episode closes when:
-  1. A new case name appears that is unrelated to the current episode, OR
-  2. No case name has been detected for ADMIN_GRACE_SECONDS (→ switch to Administrative), OR
-  3. The inactivity timeout fires.
+Rules:
+  - Only Claude can open or close an Episode (via ingest_vision).
+  - ingest_metadata() tracks context only — never changes Episode state.
+  - Hysteresis: two consecutive start_new_episode signals required (or strong
+    entity shift) before closing — prevents tab switches from splitting episodes.
+  - Inactivity > 10 min closes any active episode.
 """
 import time
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Literal, Optional
 
 import config
-from episode import Episode, new_episode
+from episode import Episode, ScreenshotEvidence, new_episode
 from observer import Observation
 
 
 @dataclass
 class EngineResult:
-    active_episode: Episode
+    active_episode: Optional[Episode]
     closed_episode: Optional[Episode] = None
 
 
 class EpisodeEngine:
     def __init__(self) -> None:
         self.active: Optional[Episode] = None
-        self._no_entity_streak: int = 0   # consecutive observations with no case entity
-        self._pending_case: str = ""      # candidate new case name
-        self._pending_streak: int = 0     # how many consecutive times we've seen it
+        self._state: Literal["idle", "active", "transitioning"] = "idle"
+        self._pending_transition_count: int = 0   # consecutive start_new signals
+        self._pending_new_name: str = ""           # candidate new Episode name
+        # In-memory metadata context (app/URL/window) — never persisted
+        self._current_app: str = ""
+        self._current_url: str = ""
+        self._current_window: str = ""
 
-    def ingest(self, obs: Observation, now: float) -> EngineResult:
-        case_name = _extract_case_name(obs)
+    # ── Public API ─────────────────────────────────────────────────────────────
 
-        if case_name:
-            self._no_entity_streak = 0
-        else:
-            self._no_entity_streak += 1
+    def ingest_vision(
+        self, evidence: Optional[ScreenshotEvidence], obs: Observation
+    ) -> Optional[EngineResult]:
+        """
+        Process a Claude vision result.
 
-        if self.active is None:
-            self._pending_case = ""
-            self._pending_streak = 0
-            self.active = new_episode(case_name or "Administrative")
-            print(f"[engine] opened  '{self.active.case_name}'")
-            return EngineResult(active_episode=self.active)
+        evidence=None means the API call failed or the screenshot was rejected —
+        retain context, do not change episode state.
 
-        if self._should_close(obs, now, case_name):
-            closed = self.active
-            closed.close()
-            self._no_entity_streak = 0
-            self._pending_case = ""
-            self._pending_streak = 0
-            self.active = new_episode(case_name or "Administrative")
-            print(f"[engine] closed  '{closed.case_name}'")
-            print(f"[engine] opened  '{self.active.case_name}'")
-            return EngineResult(active_episode=self.active, closed_episode=closed)
+        Returns EngineResult (with optional closed_episode) or None.
+        """
+        if evidence is None:
+            # API failure or non-meaningful/personal — no state change
+            return None
 
-        return EngineResult(active_episode=self.active)
+        if self._state == "idle":
+            return self._open_episode(evidence.suggested_episode_name, evidence)
+
+        # active or transitioning
+        if evidence.continue_current_episode:
+            if self._state == "transitioning":
+                # Hysteresis: revert to active — single start_new was a blip
+                self._state = "active"
+                self._pending_transition_count = 0
+                self._pending_new_name = ""
+                print(f"[engine] transition cancelled — continuing: {self.active.case_name}")
+            return self._continue_episode(evidence)
+
+        if evidence.start_new_episode:
+            return self._handle_transition(evidence)
+
+        # Neither signal set (shouldn't happen after validation, but be safe)
+        return self._continue_episode(evidence)
+
+    def ingest_metadata(self, obs: Observation) -> None:
+        """
+        Process a metadata-only observation (no screenshot or no API key).
+
+        Updates last_user_activity_at on the active episode and tracks current
+        app/URL/window context. Never opens or closes an Episode.
+        """
+        self._current_app = obs.app or ""
+        self._current_url = obs.browser_url or ""
+        self._current_window = obs.window_title or ""
+
+        if self.active:
+            self.active.last_user_activity_at = time.time()
+            self.active.add_raw_observation(obs)
+
+    def ingest_metadata_activity_only(self) -> None:
+        """Update last_user_activity_at when observe() returns None (no screen change)."""
+        if self.active:
+            self.active.last_user_activity_at = time.time()
+
+    def get_context(self) -> dict:
+        """Return current episode context for the vision prompt."""
+        if not self.active:
+            return {
+                "current_episode_name": "",
+                "current_objective": "",
+                "episode_duration_minutes": 0,
+                "recent_actions": [],
+                "known_entities": [],
+            }
+
+        recent_actions = [e.actions for e in self.active._evidence[-3:]]
+        known = []
+        seen: set[str] = set()
+        for ev in self.active._evidence:
+            for ent in ev.entities:
+                name = ent.get("name", "")
+                if name and name not in seen:
+                    seen.add(name)
+                    known.append(name)
+
+        return {
+            "current_episode_name": self.active.case_name,
+            "current_objective": self.active._objective,
+            "episode_duration_minutes": self.active.duration_minutes,
+            "recent_actions": recent_actions,
+            "known_entities": known,
+        }
 
     def check_inactivity(self, now: float) -> Optional[Episode]:
         """Close and return the active episode if idle too long."""
         if not self.active:
             return None
-        idle = now - self.active.last_activity_at
+        idle = now - self.active.last_user_activity_at
         if idle > config.INACTIVITY_TIMEOUT_SECONDS:
             ep = self.active
             ep.close()
             self.active = None
-            self._no_entity_streak = 0
-            self._pending_case = ""
-            self._pending_streak = 0
-            print(f"[engine] idle {idle:.0f}s → closed '{ep.case_name}'")
+            self._state = "idle"
+            self._pending_transition_count = 0
+            self._pending_new_name = ""
+            print(
+                f"[engine] episode finalized: '{ep.case_name}' "
+                f"({ep.duration_minutes:.0f}min, {len(ep._evidence)} evidence items) "
+                f"[idle {idle:.0f}s]"
+            )
             return ep
         return None
 
-    def _should_close(self, obs: Observation, now: float, case_name: str) -> bool:
+    # ── Private helpers ────────────────────────────────────────────────────────
+
+    def _open_episode(
+        self, name: str, evidence: ScreenshotEvidence
+    ) -> EngineResult:
+        ep = new_episode(name)
+        ep._objective = evidence.objective
+        ep._evidence.append(evidence)
+        ep.last_meaningful_evidence_at = time.time()
+        self.active = ep
+        self._state = "active"
+        self._pending_transition_count = 0
+        self._pending_new_name = ""
+        print(f"[engine] episode opened: {ep.case_name}")
+        return EngineResult(active_episode=ep)
+
+    def _continue_episode(self, evidence: ScreenshotEvidence) -> EngineResult:
         ep = self.active
+        ep._evidence.append(evidence)
+        ep.last_user_activity_at = time.time()
+        ep.last_meaningful_evidence_at = time.time()
 
-        # Hard rule: inactivity
-        if now - ep.last_activity_at > config.INACTIVITY_TIMEOUT_SECONDS:
-            return True
+        # Update name/objective if Claude provides something more specific
+        if (
+            evidence.suggested_episode_name
+            and evidence.suggested_episode_name != ep.case_name
+            and len(evidence.suggested_episode_name) > len(ep.case_name)
+        ):
+            old_name = ep.case_name
+            ep.case_name = evidence.suggested_episode_name
+            ep._objective = evidence.objective
+            print(f"[engine] episode name updated: '{old_name}' → '{ep.case_name}'")
+        elif evidence.objective and not ep._objective:
+            ep._objective = evidence.objective
 
-        # No case signal — grace period, then switch to Administrative
-        if not case_name:
-            admin_grace_obs = max(1, config.ADMIN_GRACE_SECONDS // config.CAPTURE_INTERVAL_SECONDS)
-            if ep.case_name != "Administrative" and self._no_entity_streak > admin_grace_obs:
-                return True
-            return False
+        print(f"[engine] episode continued: {ep.case_name}")
+        return EngineResult(active_episode=ep)
 
-        # Same case as current episode — reset pending
-        if case_name == ep.case_name:
-            self._pending_case = ""
-            self._pending_streak = 0
-            return False
+    def _handle_transition(self, evidence: ScreenshotEvidence) -> EngineResult:
+        self._pending_transition_count += 1
+        self._pending_new_name = evidence.suggested_episode_name
+        print(
+            f"[engine] transition pending ({self._pending_transition_count}/2): "
+            f"{self._pending_new_name}"
+        )
 
-        # Different case — require CASE_SWITCH_THRESHOLD consecutive observations.
-        # Brief glances (< threshold) won't close the episode; going back to the
-        # current case resets the streak. entity_counts is intentionally not used
-        # here — relying on streak alone avoids the "black hole" where every entity
-        # ever seen gets absorbed into entity_counts and no close ever fires.
-        if case_name == self._pending_case:
-            self._pending_streak += 1
-        else:
-            self._pending_case = case_name
-            self._pending_streak = 1
+        if self._pending_transition_count >= 2:
+            return self._finalize_and_open(evidence)
 
-        if self._pending_streak >= config.CASE_SWITCH_THRESHOLD:
-            return True
+        # Check for strong entity shift — immediately transition on unmistakable change
+        if _has_strong_entity_shift(evidence, self.active):
+            print(f"[engine] strong entity shift detected — transitioning immediately")
+            return self._finalize_and_open(evidence)
 
-        return False  # not confident enough yet
+        self._state = "transitioning"
+        return EngineResult(active_episode=self.active)
+
+    def _finalize_and_open(self, evidence: ScreenshotEvidence) -> EngineResult:
+        closed = self.active
+        closed.close()
+        print(
+            f"[engine] episode finalized: '{closed.case_name}' "
+            f"({closed.duration_minutes:.0f}min, {len(closed._evidence)} evidence items)"
+        )
+
+        ep = new_episode(evidence.suggested_episode_name)
+        ep._objective = evidence.objective
+        ep._evidence.append(evidence)
+        ep.last_meaningful_evidence_at = time.time()
+        self.active = ep
+        self._state = "active"
+        self._pending_transition_count = 0
+        self._pending_new_name = ""
+        print(f"[engine] episode opened: {ep.case_name}")
+        return EngineResult(active_episode=ep, closed_episode=closed)
 
 
-def _extract_case_name(obs: Observation) -> str:
+def _has_strong_entity_shift(evidence: ScreenshotEvidence, current: Optional[Episode]) -> bool:
     """
-    Return the primary case name from an observation.
-    entities is ordered: structured identifiers first, file stem second, NER last.
+    Returns True if evidence contains a strong-confidence entity that is
+    clearly different from all entities seen in the current episode.
+    Only fires on evidence_strength='strong' — moderate/weak don't split episodes.
     """
-    return obs.entities[0] if obs.entities else ""
+    if not current or not current._evidence:
+        return False
+
+    strong_new = {
+        e["name"].lower()
+        for e in evidence.entities
+        if e.get("evidence_strength") == "strong"
+    }
+    if not strong_new:
+        return False
+
+    known = {
+        e["name"].lower()
+        for ev in current._evidence
+        for e in ev.entities
+    }
+    # Shift only if ALL strong new entities are absent from known entities
+    return bool(strong_new) and strong_new.isdisjoint(known)

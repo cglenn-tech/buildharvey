@@ -24,13 +24,22 @@ def enqueue_episode(episode_dict: dict) -> None:
     _queue.put(episode_dict)
 
 
+def enqueue_cleanup(invalid_ids: list[str]) -> None:
+    """Queue an is_reportable=false update to Supabase for known invalid episodes."""
+    if invalid_ids:
+        _queue.put({"_type": "cleanup", "ids": invalid_ids})
+
+
 def _worker() -> None:
     conn = database.connect()
     client = _make_client()
     while True:
         task = _queue.get()
         try:
-            _upsert(client, task, conn)
+            if isinstance(task, dict) and task.get("_type") == "cleanup":
+                _cleanup(client, task["ids"])
+            else:
+                _upsert(client, task, conn)
         except Exception:
             traceback.print_exc()
         finally:
@@ -46,6 +55,19 @@ def _upsert(client, episode_dict: dict, conn: sqlite3.Connection) -> None:
         print(f"[sync] synced {episode_dict['id'][:8]}… '{episode_dict['case_name']}'")
     except Exception as exc:
         print(f"[sync] upsert failed: {exc}")
+
+
+def _cleanup(client, invalid_ids: list[str]) -> None:
+    if not client or not invalid_ids:
+        return
+    try:
+        client.table("episodes") \
+            .update({"is_reportable": False}) \
+            .in_("id", invalid_ids) \
+            .execute()
+        print(f"[sync] marked {len(invalid_ids)} invalid episode(s) in Supabase")
+    except Exception as exc:
+        print(f"[sync] cleanup failed: {exc}")
 
 
 def _make_client():

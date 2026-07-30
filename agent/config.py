@@ -6,11 +6,15 @@ BASE_DIR = Path.home() / ".buildharvey"
 DB_PATH = BASE_DIR / "buildharvey.db"
 
 # Two temp frame slots for diff comparison.
-# Frames are never kept permanently — images are processing artifacts only.
 TEMP_FRAME_PATH = BASE_DIR / "_current.png"
 PREV_FRAME_PATH = BASE_DIR / "_prev.png"
 
+# Screenshots saved per observation for Claude Vision analysis.
+# Deleted after episode finalization.
+SCREENSHOTS_DIR = BASE_DIR / "screenshots"
+
 BASE_DIR.mkdir(exist_ok=True)
+SCREENSHOTS_DIR.mkdir(exist_ok=True)
 
 # ── Capture ───────────────────────────────────────────────────────────────────
 CAPTURE_INTERVAL_SECONDS = 5    # seconds between screen captures
@@ -25,6 +29,18 @@ CASE_SWITCH_THRESHOLD = 3               # consecutive observations of the same n
                                         # from scrolling, ads, or transient OCR noise
 MIN_EPISODE_DURATION_MINUTES = 0.5      # episodes shorter than this are discarded
 MAX_KEY_OBSERVATIONS = 8               # max observations stored per episode
+
+# ── Anthropic ─────────────────────────────────────────────────────────────────
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+OBSERVATION_MODEL = "claude-haiku-4-5"   # fast model for per-episode finalization
+
+# Max screenshots passed to Claude Vision per episode.
+# Screenshots are subsampled evenly if more were captured.
+MAX_VISION_SCREENSHOTS = 8
+
+# Max pixel dimensions for screenshots sent to the vision API.
+# Reduces token cost while preserving enough resolution to read content.
+SCREENSHOT_MAX_SIZE = (1440, 900)
 
 # ── Supabase ──────────────────────────────────────────────────────────────────
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")

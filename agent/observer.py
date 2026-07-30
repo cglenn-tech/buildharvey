@@ -1,9 +1,9 @@
 """
 Observer — captures the screen, extracts facts, produces Observations.
 
-The screen image is a temporary processing artifact.
-It is captured, OCR'd, and discarded.
-It is never stored, uploaded, or referenced after this module returns.
+Screenshots are saved per observation so the finalizer can use Claude Vision
+to understand what work was actually occurring. Screenshots are deleted after
+episode finalization.
 """
 import shutil
 import time
@@ -27,6 +27,7 @@ class Observation:
     browser_url: str        # active URL if a browser is frontmost, else ""
     file_path: str          # open document path if available, else ""
     entities: list[str] = field(default_factory=list)  # case names, identifiers
+    screenshot_path: Optional[str] = None  # saved screenshot for vision analysis
 
 
 def observe() -> Optional[Observation]:
@@ -35,7 +36,7 @@ def observe() -> Optional[Observation]:
     has changed since the previous frame.
 
     Returns None if the screen is static.
-    The captured image is discarded after OCR and entity extraction.
+    The screenshot is saved for vision analysis and deleted after episode finalization.
     """
     capture.capture_screen(config.TEMP_FRAME_PATH)
 
@@ -48,7 +49,11 @@ def observe() -> Optional[Observation]:
     text = ocr.extract_text(config.TEMP_FRAME_PATH)
     found_entities = entities_mod.extract(text, ctx.window_title, ctx.file_path)
 
-    # Save current frame as the new baseline (the only copy we keep)
+    # Save screenshot for vision analysis at episode close.
+    # Resized to reduce token cost while preserving readable text.
+    screenshot_path = _save_screenshot()
+
+    # Save current frame as the new baseline
     shutil.copy2(config.TEMP_FRAME_PATH, config.PREV_FRAME_PATH)
 
     return Observation(
@@ -58,4 +63,27 @@ def observe() -> Optional[Observation]:
         browser_url=ctx.browser_url,
         file_path=ctx.file_path,
         entities=found_entities,
+        screenshot_path=screenshot_path,
     )
+
+
+def _save_screenshot() -> Optional[str]:
+    """
+    Save a resized copy of the current frame to SCREENSHOTS_DIR.
+    Returns the path on success, None on any failure.
+    """
+    try:
+        from PIL import Image
+
+        ts = time.strftime("%Y%m%dT%H%M%S")
+        dest = config.SCREENSHOTS_DIR / f"obs_{ts}.jpg"
+
+        img = Image.open(config.TEMP_FRAME_PATH)
+        img.thumbnail(config.SCREENSHOT_MAX_SIZE, Image.LANCZOS)
+        img.save(str(dest), "JPEG", quality=85)
+
+        return str(dest)
+    except Exception as e:
+        # Screenshot saving is best-effort; observation still proceeds without it.
+        print(f"[observer] screenshot save failed: {e}")
+        return None

@@ -35,6 +35,7 @@ class RawObservation:
     browser_url: str
     file_path: str
     entities: list[str]
+    screenshot_path: Optional[str] = None  # path to saved screenshot for vision analysis
 
 
 # ── Finalized observation (persisted and sent to LLM) ─────────────────────────
@@ -96,6 +97,7 @@ class Episode:
             browser_url=obs.browser_url,
             file_path=obs.file_path,
             entities=list(obs.entities or []),
+            screenshot_path=getattr(obs, "screenshot_path", None),
         ))
         self.last_activity_at = time.time()
 

@@ -8,3 +8,4 @@ supabase
 python-dotenv
 spacy
 click
+anthropic

@@ -1,15 +1,17 @@
 """
 Observer — captures the screen, extracts facts, produces Observations.
 
-Screenshots are saved per observation so the finalizer can use Claude Vision
-to understand what work was actually occurring. Screenshots are deleted after
-episode finalization.
+Screenshots are saved selectively — only when they contain meaningful new
+information (app change, URL change, large visual shift, significant new
+OCR content, or periodic coverage gap). This keeps screenshot count low
+and signal quality high for Claude Vision at episode close.
 """
 import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import capture
 import config
@@ -30,30 +32,42 @@ class Observation:
     screenshot_path: Optional[str] = None  # saved screenshot for vision analysis
 
 
+# ── Module-level state for screenshot signal filtering ─────────────────────────
+# Tracks the context of the last saved screenshot so we can detect
+# meaningful changes without saving redundant frames.
+
+_last_app: str = ""
+_last_url_domain: str = ""
+_last_ocr_len: int = 0
+_last_saved_at: float = 0.0
+
+
 def observe() -> Optional[Observation]:
     """
     Capture the current screen and return an Observation if something meaningful
     has changed since the previous frame.
 
     Returns None if the screen is static.
-    The screenshot is saved for vision analysis and deleted after episode finalization.
+    Screenshots are saved only when they contain high-value new information.
     """
     capture.capture_screen(config.TEMP_FRAME_PATH)
 
-    # Compare against the previous baseline frame
+    # Compute diff score once; used for both the "any change" gate and the
+    # "large change" screenshot signal.
+    diff = 0.0
     if config.PREV_FRAME_PATH.exists():
-        if not capture.image_changed(config.PREV_FRAME_PATH, config.TEMP_FRAME_PATH):
-            return None
+        diff = capture.diff_score(config.PREV_FRAME_PATH, config.TEMP_FRAME_PATH)
+        if diff <= config.DIFF_THRESHOLD:
+            return None  # screen is static — nothing to record
 
     ctx = ctx_module.get_context()
     text = ocr.extract_text(config.TEMP_FRAME_PATH)
     found_entities = entities_mod.extract(text, ctx.window_title, ctx.file_path)
 
-    # Save screenshot for vision analysis at episode close.
-    # Resized to reduce token cost while preserving readable text.
-    screenshot_path = _save_screenshot()
+    # Save screenshot only if this frame represents meaningful new information.
+    screenshot_path = _save_screenshot(ctx, text, diff)
 
-    # Save current frame as the new baseline
+    # Update the diff baseline regardless of whether a screenshot was saved.
     shutil.copy2(config.TEMP_FRAME_PATH, config.PREV_FRAME_PATH)
 
     return Observation(
@@ -67,11 +81,63 @@ def observe() -> Optional[Observation]:
     )
 
 
-def _save_screenshot() -> Optional[str]:
+# ── Screenshot selection ───────────────────────────────────────────────────────
+
+def _save_screenshot(ctx, text: str, diff: float) -> Optional[str]:
     """
-    Save a resized copy of the current frame to SCREENSHOTS_DIR.
-    Returns the path on success, None on any failure.
+    Save a screenshot only if this frame is high-value.
+
+    High-value signals:
+      - First screenshot (or long time since last one)
+      - Application changed
+      - Browser navigated to a different domain
+      - Large visual change (new page, document, window)
+      - Significant new OCR content appeared
+
+    Returns the saved path on success, None if skipped or on error.
     """
+    if not _is_high_value(ctx, text, diff):
+        return None
+
+    return _write_screenshot(ctx, text)
+
+
+def _is_high_value(ctx, text: str, diff: float) -> bool:
+    """Return True if this frame warrants a saved screenshot."""
+    global _last_app, _last_url_domain, _last_ocr_len, _last_saved_at
+
+    now = time.time()
+
+    # Periodic coverage: always capture if enough time has passed.
+    if now - _last_saved_at >= config.SCREENSHOT_MIN_INTERVAL:
+        return True
+
+    # Application switched — always a meaningful context change.
+    if ctx.app_name != _last_app:
+        return True
+
+    # Browser navigated to a different domain.
+    current_domain = _domain(ctx.browser_url)
+    if current_domain and current_domain != _last_url_domain:
+        return True
+
+    # Large visual shift (new page, modal, document).
+    if diff >= config.SCREENSHOT_LARGE_DIFF:
+        return True
+
+    # Significant OCR change: substantial new text appeared on screen.
+    if _last_ocr_len > 0:
+        change = abs(len(text) - _last_ocr_len) / _last_ocr_len
+        if change >= 0.30:
+            return True
+
+    return False
+
+
+def _write_screenshot(ctx, text: str) -> Optional[str]:
+    """Resize and save the current frame; update module state. Returns path or None."""
+    global _last_app, _last_url_domain, _last_ocr_len, _last_saved_at
+
     try:
         from PIL import Image
 
@@ -82,8 +148,22 @@ def _save_screenshot() -> Optional[str]:
         img.thumbnail(config.SCREENSHOT_MAX_SIZE, Image.LANCZOS)
         img.save(str(dest), "JPEG", quality=85)
 
+        # Update state only on success so a failed save doesn't advance the baseline.
+        _last_app = ctx.app_name
+        _last_url_domain = _domain(ctx.browser_url)
+        _last_ocr_len = len(text)
+        _last_saved_at = time.time()
+
         return str(dest)
     except Exception as e:
-        # Screenshot saving is best-effort; observation still proceeds without it.
         print(f"[observer] screenshot save failed: {e}")
         return None
+
+
+def _domain(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        return urlparse(url).netloc
+    except Exception:
+        return ""

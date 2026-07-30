@@ -10,8 +10,8 @@ Responsibilities:
   - Cap at MAX_KEY_OBSERVATIONS
   - Delete all saved screenshots after finalization
 
-Screenshots are the primary source of truth.
-Metadata (app, URL, window title, entities) is supporting evidence.
+Core philosophy: produce observations that read like an executive assistant
+summarized the work — not browser history. Synthesize. Connect. Reconstruct.
 """
 import base64
 import json
@@ -51,7 +51,6 @@ def _llm_observations(episode: Episode, raw: list[RawObservation]) -> list[KeyOb
     Use Claude to produce rich narrative observations.
 
     Prefers vision-based analysis when screenshots are available.
-    Screenshots are the primary evidence; metadata is supporting context.
     Falls back to text-only metadata when no screenshots exist.
     """
     try:
@@ -60,7 +59,6 @@ def _llm_observations(episode: Episode, raw: list[RawObservation]) -> list[KeyOb
         return []
 
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-
     screenshot_paths = _select_screenshots(raw)
 
     try:
@@ -86,9 +84,27 @@ def _select_screenshots(raw: list[RawObservation]) -> list[str]:
     if len(paths) <= n:
         return paths
 
-    # Evenly sample n paths across the full list
     indices = [int(round(i * (len(paths) - 1) / (n - 1))) for i in range(n)]
     return [paths[i] for i in indices]
+
+
+def _activity_log(raw: list[RawObservation]) -> str:
+    """Format raw observations as a compact activity log for Claude context."""
+    lines = []
+    for r in raw:
+        parts = [r.timestamp]
+        if r.app:
+            parts.append(r.app)
+        if r.window_title:
+            parts.append(f'"{r.window_title}"')
+        if r.browser_url:
+            parts.append(r.browser_url)
+        if r.file_path:
+            parts.append(r.file_path)
+        if r.entities:
+            parts.append("entities: " + ", ".join(r.entities[:4]))
+        lines.append(" | ".join(parts))
+    return "\n".join(lines)
 
 
 def _vision_observations(
@@ -101,49 +117,36 @@ def _vision_observations(
     Build a multimodal Claude Vision call.
 
     Screenshots are the primary evidence of what work occurred.
-    Metadata (timestamps, window titles, URLs, entities) is included as
-    supporting context to help ground the visual analysis.
+    Metadata is supporting context for grounding the analysis.
+    The prompt asks Claude to synthesize and reconstruct — not enumerate.
     """
-    # Build a quick-reference index: screenshot path → raw observation
     path_to_raw: dict[str, RawObservation] = {}
     for r in raw:
         if r.screenshot_path and r.screenshot_path not in path_to_raw:
             path_to_raw[r.screenshot_path] = r
 
-    # Build the metadata activity log as supporting context
-    log_lines = []
-    for r in raw:
-        parts = [r.timestamp]
-        if r.window_title:
-            parts.append(f'"{r.window_title}"')
-        if r.browser_url:
-            parts.append(r.browser_url)
-        if r.file_path:
-            parts.append(r.file_path)
-        if r.entities:
-            parts.append("entities: " + ", ".join(r.entities[:6]))
-        log_lines.append(" | ".join(parts))
+    log = _activity_log(raw)
+    duration = episode.duration_minutes
 
-    activity_log = "\n".join(log_lines)
-
-    # Build the multimodal content array
     content: list[dict] = []
 
     content.append({
         "type": "text",
         "text": (
-            f"You are analyzing a work session to reconstruct what actually happened.\n\n"
+            f"You are an experienced executive assistant reconstructing a work session "
+            f"from screen evidence.\n\n"
             f"Work subject: {episode.case_name}\n"
-            f"Session: {episode.started_at} → {episode.ended_at}\n\n"
-            f"Supporting metadata (timestamp | window | url/file | entities):\n"
-            f"{activity_log}\n\n"
-            f"Below are {len(screenshot_paths)} screenshots from this session. "
-            f"Use them as the primary evidence of what work occurred.\n\n"
-            f"For each screenshot, examine:\n"
-            f"- What is actually visible on screen?\n"
-            f"- What content is being read, written, or worked on?\n"
-            f"- What task appears to be underway?\n"
-            f"- What has meaningfully changed since the previous screenshot?\n"
+            f"Session: {episode.started_at} → {episode.ended_at} "
+            f"({duration:.0f} minutes)\n\n"
+            f"Activity log (timestamp | app | window/url/file | entities):\n"
+            f"{log}\n\n"
+            f"Below are {len(screenshot_paths)} screenshots from key moments in this session. "
+            f"Use them as your primary evidence.\n\n"
+            f"Before you write, reason through:\n"
+            f"1. What was the user actually trying to accomplish overall?\n"
+            f"2. What are the distinct work threads? (e.g., 'drafting X' vs 'researching Y')\n"
+            f"3. Does anything appear later in the session that explains earlier activity?\n"
+            f"4. Can multiple related observations be synthesized into one clear memory?\n"
         ),
     })
 
@@ -157,6 +160,8 @@ def _vision_observations(
             label_parts = []
             if r:
                 label_parts.append(r.timestamp)
+                if r.app:
+                    label_parts.append(r.app)
                 if r.window_title:
                     label_parts.append(r.window_title)
                 if r.browser_url:
@@ -179,27 +184,11 @@ def _vision_observations(
             print(f"[finalizer] could not load screenshot {path}: {e}")
 
     if loaded == 0:
-        # All screenshots failed to load; fall back to text-only
         return _text_observations(client, episode, raw)
 
     content.append({
         "type": "text",
-        "text": (
-            f"\nBased on what is actually visible in these screenshots — not just which "
-            f"app or website is open — write up to {config.MAX_KEY_OBSERVATIONS} observations "
-            f"describing the real work that occurred.\n\n"
-            f"Each observation must:\n"
-            f"- Describe the actual visible work ('Reviewed Smith appraisal — coverage "
-            f"section page 12' not 'Viewed PDF')\n"
-            f"- Reference specific content visible in screenshots: names, documents, "
-            f"text being written, data being reviewed, forms being filled\n"
-            f"- Note meaningful changes between screenshots when relevant\n"
-            f"- Connect context across the session (a name appearing mid-session ties "
-            f"to earlier activity)\n"
-            f"- Be useful as a memory entry one week later\n\n"
-            f"Return ONLY a JSON array with no surrounding text:\n"
-            f'[{{"timestamp": "HH:MM", "text": "..."}}]'
-        ),
+        "text": _synthesis_instructions(config.MAX_KEY_OBSERVATIONS),
     })
 
     response = client.messages.create(
@@ -218,37 +207,26 @@ def _text_observations(
 ) -> list[KeyObservation]:
     """
     Text-only Claude call when no screenshots are available.
-    Used as fallback when screenshot saving fails across an entire episode.
+    Same synthesis-first philosophy — reconstruct work, not navigation.
     """
-    lines = []
-    for r in raw:
-        parts = [r.timestamp]
-        if r.window_title:
-            parts.append(f'"{r.window_title}"')
-        if r.browser_url:
-            parts.append(r.browser_url)
-        if r.file_path:
-            parts.append(r.file_path)
-        if r.entities:
-            parts.append("entities: " + ", ".join(r.entities[:6]))
-        lines.append(" | ".join(parts))
-
-    context_block = "\n".join(lines)
+    log = _activity_log(raw)
+    duration = episode.duration_minutes
 
     prompt = (
-        f"You are analyzing screen captures from a work session to create rich memory observations.\n\n"
+        f"You are an experienced executive assistant reconstructing a work session "
+        f"from activity metadata.\n\n"
         f"Work subject: {episode.case_name}\n"
-        f"Session: {episode.started_at} → {episode.ended_at}\n\n"
-        f"Each line is one screen capture (timestamp | window title | entities detected):\n\n"
-        f"{context_block}\n\n"
-        f"Write up to {config.MAX_KEY_OBSERVATIONS} observations that capture what the user was doing.\n\n"
-        f"Each observation must:\n"
-        f"- Describe the ACTIVITY, not the screen ('Reviewed the Smith appraisal' not 'Viewed PDF')\n"
-        f"- Include names, organizations, case numbers, documents, or projects that appeared\n"
-        f"- Connect context across captures when helpful\n"
-        f"- Be useful as a memory entry one week later\n\n"
-        f"Return ONLY a JSON array with no surrounding text:\n"
-        f'[{{"timestamp": "HH:MM", "text": "..."}}]'
+        f"Session: {episode.started_at} → {episode.ended_at} "
+        f"({duration:.0f} minutes)\n\n"
+        f"Activity log (timestamp | app | window/url/file | entities):\n"
+        f"{log}\n\n"
+        f"Before you write, reason through:\n"
+        f"1. What was the user actually trying to accomplish overall?\n"
+        f"2. What are the distinct work threads?\n"
+        f"3. Does anything later in the log explain earlier activity? "
+        f"(A name or project appearing mid-session often clarifies what came before.)\n"
+        f"4. Which entries can be synthesized into one meaningful memory?\n\n"
+        + _synthesis_instructions(config.MAX_KEY_OBSERVATIONS)
     )
 
     response = client.messages.create(
@@ -258,6 +236,36 @@ def _text_observations(
     )
 
     return _parse_response(response.content[0].text)
+
+
+def _synthesis_instructions(max_obs: int) -> str:
+    """
+    The core instruction block telling Claude how to produce observations.
+    Shared between vision and text-only prompts.
+    """
+    return (
+        f"\nWrite up to {max_obs} observations that reconstruct the actual work. "
+        f"These will be read as memories one week later.\n\n"
+        f"SYNTHESIZE related activity into single observations:\n"
+        f'  Good: "Researched luxury hotel options in New York across multiple sources '
+        f'while evaluating relocation costs"\n'
+        f'  Bad: "Visited YouTube" / "Visited Aman NYC" / "Searched Google Hotels"\n\n'
+        f"DESCRIBE THE WORK, not the tool:\n"
+        f'  Good: "Reviewed coverage dispute section of the Smith claim file"\n'
+        f'  Bad: "Opened PDF in Preview" / "Used Microsoft Word"\n\n'
+        f"CONNECT DELAYED CONTEXT — if a name, project, or subject appears later "
+        f"and clearly explains earlier activity, tie them together:\n"
+        f'  Good: "Reviewed BuildHarvey deployment configuration while working through '
+        f'screenshot-based observation pipeline"\n\n'
+        f"BE SPECIFIC about what was visible: document names, people, companies, "
+        f"topics, amounts, decisions, problems being solved.\n\n"
+        f"ANSWER the questions a colleague would ask a week later:\n"
+        f"  - What was being accomplished?\n"
+        f"  - Why did it matter?\n"
+        f"  - What specifically was worked on?\n\n"
+        f"Return ONLY a JSON array with no surrounding text:\n"
+        f'[{{"timestamp": "HH:MM", "text": "..."}}]'
+    )
 
 
 def _parse_response(text: str) -> list[KeyObservation]:

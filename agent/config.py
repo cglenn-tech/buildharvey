@@ -42,6 +42,14 @@ MAX_VISION_SCREENSHOTS = 8
 # Reduces token cost while preserving enough resolution to read content.
 SCREENSHOT_MAX_SIZE = (1440, 900)
 
+# Pixel diff fraction above which a screenshot is treated as a significant
+# visual change and saved regardless of other signals (e.g. new page loaded).
+SCREENSHOT_LARGE_DIFF = 0.15
+
+# Always save a screenshot at least this often (seconds) even if no other
+# signal fires, so long sessions have periodic coverage.
+SCREENSHOT_MIN_INTERVAL = 60.0
+
 # ── Supabase ──────────────────────────────────────────────────────────────────
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")   # service role key

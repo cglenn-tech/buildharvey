@@ -35,14 +35,16 @@ export async function POST(request: Request) {
 
   const context = episodes.map(formatEpisode).join("\n\n---\n\n");
 
-  const client = new Anthropic();
-  const message = await client.messages.create({
-    model: "claude-opus-4-6",
-    max_tokens: 4096,
-    messages: [
-      {
-        role: "user",
-        content: `You are generating a professional weekly work report for a knowledge worker (attorney, appraiser, accountant, or consultant).
+  let report: string;
+  try {
+    const client = new Anthropic();
+    const message = await client.messages.create({
+      model: "claude-opus-4-6",
+      max_tokens: 4096,
+      messages: [
+        {
+          role: "user",
+          content: `You are generating a professional weekly work report for a knowledge worker (attorney, appraiser, accountant, or consultant).
 
 Below are structured work episodes from the week. Each episode represents work done on one case or matter.
 
@@ -73,12 +75,14 @@ Rules:
 Work Episodes:
 
 ${context}`,
-      },
-    ],
-  });
-
-  const report =
-    message.content[0].type === "text" ? message.content[0].text : "";
+        },
+      ],
+    });
+    report = message.content[0].type === "text" ? message.content[0].text : "";
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return Response.json({ error: `AI report generation failed: ${msg}` }, { status: 500 });
+  }
 
   return Response.json({ report });
 }

@@ -53,9 +53,14 @@ export default function ReportGenerator() {
           weekEnd: to + "T23:59:59Z",
         }),
       });
-      const json = await res.json();
+      let json: { error?: string; report?: string };
+      try {
+        json = await res.json();
+      } catch {
+        throw new Error(`Server error (${res.status})`);
+      }
       if (json.error) throw new Error(json.error);
-      setReport(json.report);
+      setReport(json.report ?? "");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Unknown error");
     } finally {

@@ -1,5 +1,5 @@
 import type { NextRequest } from 'next/server'
-import { getBrowserClient } from '@/lib/supabase-browser'
+import { getServerClient } from '@/lib/supabase-server'
 import { rateLimit } from '@/lib/rate-limit'
 
 export async function POST(request: NextRequest) {
@@ -20,7 +20,7 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: 'Too many requests. Wait before resending.' }, { status: 429 })
   }
 
-  const supabase = getBrowserClient()
+  const supabase = await getServerClient()
   const { error } = await supabase.auth.resend({ type: 'signup', email })
 
   if (error) {

@@ -1,3 +1,4 @@
+import 'server-only'
 import { getAdminClient } from './supabase-admin'
 
 export async function rateLimit(

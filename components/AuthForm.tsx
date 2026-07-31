@@ -29,14 +29,33 @@ export default function AuthForm() {
         const { data, error: signUpError } = await supabase.auth.signUp({
           email,
           password,
-          options: { emailRedirectTo: '/auth/callback' },
+          options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
         })
 
         if (signUpError) {
-          if (signUpError.message.toLowerCase().includes('already registered')) {
-            setError('Account exists — sign in instead')
+          console.error('[signup] error', {
+            message: signUpError.message,
+            name:    signUpError.name,
+            status:  signUpError.status,
+            code:    signUpError.code,
+          })
+
+          const msg = signUpError.message ?? ''
+
+          if (msg.toLowerCase().includes('already registered') ||
+              msg.toLowerCase().includes('user already registered')) {
+            setError('This account may already exist. Sign in or resend verification.')
+          } else if (signUpError.status === 429 || msg.toLowerCase().includes('rate')) {
+            setError('Too many attempts. Please wait a moment and try again.')
+          } else if (
+            signUpError.status === 500 ||
+            msg === '{}' ||
+            msg === '' ||
+            !msg
+          ) {
+            setError("We couldn't send the verification email. Please try again shortly.")
           } else {
-            setError(signUpError.message)
+            setError(msg)
           }
           return
         }

@@ -24,12 +24,24 @@ export default async function Home() {
 
   // Verified but no active device → redirect to download
   const admin = getAdminClient()
-  const { data: devices } = await admin
+  const { data: devices, error: devicesError } = await admin
     .from('devices')
     .select('id')
     .eq('user_id', user.id)
     .is('revoked_at', null)
     .limit(1)
+
+  if (devicesError) {
+    console.error('[home] device lookup failed', { message: devicesError.message })
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <p className="text-sm text-neutral-500">
+          Something went wrong.{' '}
+          <a href="/" className="underline text-neutral-900">Retry</a>
+        </p>
+      </div>
+    )
+  }
 
   if (!devices || devices.length === 0) {
     redirect('/download')

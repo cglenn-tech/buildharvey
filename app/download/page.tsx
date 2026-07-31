@@ -1,75 +1,71 @@
-'use client'
+import { redirect } from 'next/navigation'
+import { getServerClient } from '@/lib/supabase-server'
+import { getAdminClient } from '@/lib/supabase-admin'
+import DownloadButton from '@/components/DownloadButton'
 
-import { useState, useEffect } from 'react'
-import { useRouter } from 'next/navigation'
+export const dynamic = 'force-dynamic'
 
-interface ReleaseInfo {
+interface ReleaseProps {
   version: string
-  sha256: string | null
+  sha256: string
 }
 
-export default function DownloadPage() {
-  const router = useRouter()
-  const [release, setRelease] = useState<ReleaseInfo | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
+export default async function DownloadPage() {
+  const supabase = await getServerClient()
+  const { data: { user }, error: authError } = await supabase.auth.getUser()
 
-  useEffect(() => {
-    fetch('/api/download/info')
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.version) setRelease(d)
-      })
-      .catch(() => {})
-  }, [])
-
-  async function handleDownload() {
-    setLoading(true)
-    setError('')
-    try {
-      const res = await fetch('/api/download', { method: 'POST' })
-      const json = await res.json()
-      if (!res.ok || json.error) {
-        setError(json.error ?? 'Download unavailable')
-        return
-      }
-      window.location.href = json.url
-    } catch {
-      setError('Download failed. Try again.')
-    } finally {
-      setLoading(false)
-    }
+  if (authError || !user) {
+    redirect('/')
   }
+
+  if (!user.email_confirmed_at) {
+    redirect(`/verify?email=${encodeURIComponent(user.email ?? '')}`)
+  }
+
+  const admin = getAdminClient()
+  const { data: releases } = await admin
+    .from('app_releases')
+    .select('version, sha256')
+    .eq('active', true)
+    .eq('platform', 'macos')
+    .limit(1)
+
+  const release: ReleaseProps | null =
+    releases && releases.length > 0 ? releases[0] : null
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-white">
       <div className="max-w-sm px-6 w-full">
-        <h1 className="text-lg font-semibold text-neutral-900 mb-2">
+        <h1 className="text-lg font-semibold text-neutral-900 mb-1">BuildHarvey</h1>
+        <h2 className="text-base font-medium text-neutral-900 mb-2">
           Download BuildHarvey
-        </h1>
+        </h2>
+        <p className="text-sm text-neutral-500 mb-4">
+          Install BuildHarvey on the Mac you use for work.
+        </p>
 
-        {release && (
-          <p className="text-sm text-neutral-500 mb-1">Version {release.version}</p>
-        )}
-        {release?.sha256 && (
-          <p className="text-xs text-neutral-400 mb-6 break-all font-mono">
-            SHA-256: {release.sha256}
+        {release ? (
+          <>
+            <p className="text-sm text-neutral-500 mb-6">
+              Version: {release.version} · System: macOS
+            </p>
+
+            <DownloadButton version={release.version} sha256={release.sha256} />
+
+            <details className="mt-6">
+              <summary className="text-xs text-neutral-400 cursor-pointer">
+                Verify download
+              </summary>
+              <p className="text-xs font-mono text-neutral-400 mt-1 break-all">
+                SHA-256: {release.sha256}
+              </p>
+            </details>
+          </>
+        ) : (
+          <p className="text-sm text-neutral-500">
+            The installer is currently unavailable. Please check back shortly.
           </p>
         )}
-
-        <button
-          onClick={handleDownload}
-          disabled={loading}
-          className="w-full bg-neutral-900 text-white rounded px-4 py-2 text-sm font-medium disabled:opacity-40 mb-4"
-        >
-          {loading ? 'Preparing…' : 'Download for Mac'}
-        </button>
-
-        {error && <p className="text-sm text-red-600 mb-4">{error}</p>}
-
-        <p className="text-sm text-neutral-500">
-          After installing, open BuildHarvey and connect your account.
-        </p>
       </div>
     </div>
   )

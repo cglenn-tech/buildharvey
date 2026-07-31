@@ -53,6 +53,7 @@ SCREENSHOT_LARGE_DIFF = 0.15
 # signal fires, so long sessions have periodic coverage.
 SCREENSHOT_MIN_INTERVAL = 60.0
 
-# ── Supabase ──────────────────────────────────────────────────────────────────
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")   # service role key
+# ── API ───────────────────────────────────────────────────────────────────────
+# Development: set BUILDHARVEY_BASE_URL=http://localhost:3000 in agent/.env
+# Production app bundle uses the hardcoded default.
+BASE_URL = os.environ.get("BUILDHARVEY_BASE_URL", "https://buildharvey.com")

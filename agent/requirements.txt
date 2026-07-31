@@ -1,11 +1,9 @@
 mss
 Pillow
 numpy
-pyobjc-framework-Cocoa
+pyobjc-framework-Cocoa>=10.0
 pyobjc-framework-Vision
-pyobjc-framework-Quartz
-supabase
+pyobjc-framework-Quartz>=10.0
 python-dotenv
 spacy
-click
 anthropic

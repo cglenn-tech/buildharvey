@@ -1,18 +1,48 @@
-import { getSupabaseClient } from "@/lib/supabase";
-import type { Episode } from "@/lib/types";
-import EpisodeList from "@/components/EpisodeList";
-import ReportGenerator from "@/components/ReportGenerator";
+import { redirect } from 'next/navigation'
+import { getServerClient } from '@/lib/supabase-server'
+import { getAdminClient } from '@/lib/supabase-admin'
+import type { Episode } from '@/lib/types'
+import EpisodeList from '@/components/EpisodeList'
+import ReportGenerator from '@/components/ReportGenerator'
+import AuthForm from '@/components/AuthForm'
 
-export const dynamic = "force-dynamic";
+export const dynamic = 'force-dynamic'
 
 export default async function Home() {
-  const supabase = getSupabaseClient();
-  const { data } = await supabase
-    .from("episodes")
-    .select("*")
-    .order("started_at", { ascending: false });
+  const supabase = await getServerClient()
+  const { data: { user } } = await supabase.auth.getUser()
 
-  const episodes = (data as Episode[]) ?? [];
+  // No session → show auth form
+  if (!user) {
+    return <AuthForm />
+  }
+
+  // Session but email not confirmed → redirect to verify
+  if (!user.email_confirmed_at) {
+    redirect(`/verify?email=${encodeURIComponent(user.email ?? '')}`)
+  }
+
+  // Verified but no active device → redirect to download
+  const admin = getAdminClient()
+  const { data: devices } = await admin
+    .from('devices')
+    .select('id')
+    .eq('user_id', user.id)
+    .is('revoked_at', null)
+    .limit(1)
+
+  if (!devices || devices.length === 0) {
+    redirect('/download')
+  }
+
+  // Authenticated with device → show homepage
+  const { data } = await admin
+    .from('episodes')
+    .select('*')
+    .eq('user_id', user.id)
+    .order('started_at', { ascending: false })
+
+  const episodes = (data as Episode[]) ?? []
 
   return (
     <main className="max-w-2xl mx-auto px-6 py-10">
@@ -29,5 +59,5 @@ export default async function Home() {
 
       <EpisodeList initialEpisodes={episodes} />
     </main>
-  );
+  )
 }

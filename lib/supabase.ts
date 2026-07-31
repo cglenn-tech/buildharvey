@@ -1,8 +1,7 @@
-import { createClient } from "@supabase/supabase-js";
+import { getBrowserClient } from './supabase-browser'
 
+// Kept for compatibility with existing API routes.
+// New code should use getServerClient() or getAdminClient() as appropriate.
 export function getSupabaseClient() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-  );
+  return getBrowserClient()
 }

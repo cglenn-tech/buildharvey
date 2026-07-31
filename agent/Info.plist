@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.buildharvey.agent</string>
+  <key>CFBundleName</key>
+  <string>BuildHarvey</string>
+  <key>CFBundleDisplayName</key>
+  <string>BuildHarvey</string>
+  <key>CFBundleVersion</key>
+  <string>1.0</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>NSPrincipalClass</key>
+  <string>NSApplication</string>
+  <!-- Required: usage description shown in the Screen Recording TCC dialog -->
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>BuildHarvey needs permission to observe your work so it can organize completed tasks into your weekly report.</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+</dict>
+</plist>

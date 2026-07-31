@@ -1,8 +1,15 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { getSupabaseClient } from "@/lib/supabase";
+import { getServerClient } from "@/lib/supabase-server";
 import type { Episode, KeyObservation } from "@/lib/types";
 
 export async function POST(request: Request) {
+  const supabase = await getServerClient();
+  const { data: { user } } = await supabase.auth.getUser();
+
+  if (!user) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { weekStart, weekEnd } = await request.json();
 
   if (!weekStart || !weekEnd) {
@@ -12,8 +19,7 @@ export async function POST(request: Request) {
     );
   }
 
-  // Fetch every episode in the requested date range
-  const supabase = getSupabaseClient();
+  // Fetch episodes in the requested date range for the authenticated user
   const { data, error } = await supabase
     .from("episodes")
     .select("*")

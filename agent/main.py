@@ -2,17 +2,18 @@
 BuildHarvey Desktop Agent.
 
 Run:  python main.py
+      (or launched automatically by app.py after credential and permissions are set up)
 
 Loop:
   1. Capture screen → extract context → build Observation.
   2. If screenshot available and API key configured: analyze with Claude Vision.
      Engine decides: continue current episode, open new, or transition.
   3. If no screenshot or no API key: update metadata context only.
-  4. On episode close: finalize → persist to SQLite → enqueue Supabase sync.
+  4. On episode close: finalize → persist to SQLite → enqueue server sync.
 
 Startup:
   - Mark locally invalid episodes (not deleted — just flagged).
-  - Enqueue Supabase cleanup for those IDs.
+  - Enqueue server cleanup for those IDs.
 
 Degraded mode (no API key):
   - Vision analysis skipped; no Episodes opened.
@@ -43,7 +44,7 @@ def main() -> None:
 
     conn = database.connect()
 
-    # Mark known garbage and propagate to Supabase
+    # Mark known garbage and propagate to server
     invalid_ids = database.mark_invalid_episodes(conn)
     if invalid_ids:
         sync.enqueue_cleanup(invalid_ids)

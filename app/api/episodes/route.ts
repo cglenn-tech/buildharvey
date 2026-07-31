@@ -1,16 +1,22 @@
-import { getSupabaseClient } from "@/lib/supabase";
-import type { Episode } from "@/lib/types";
+import { getServerClient } from '@/lib/supabase-server'
+import type { Episode } from '@/lib/types'
 
 export async function GET() {
-  const supabase = getSupabaseClient();
-  const { data, error } = await supabase
-    .from("episodes")
-    .select("*")
-    .order("started_at", { ascending: false });
+  const supabase = await getServerClient()
+  const { data: { user } } = await supabase.auth.getUser()
 
-  if (error) {
-    return Response.json({ error: error.message }, { status: 500 });
+  if (!user) {
+    return Response.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  return Response.json(data as Episode[]);
+  const { data, error } = await supabase
+    .from('episodes')
+    .select('*')
+    .order('started_at', { ascending: false })
+
+  if (error) {
+    return Response.json({ error: error.message }, { status: 500 })
+  }
+
+  return Response.json(data as Episode[])
 }

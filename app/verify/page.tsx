@@ -2,11 +2,11 @@ import { getServerClient } from '@/lib/supabase-server'
 import VerifyEmailBox from '@/components/VerifyEmailBox'
 
 interface Props {
-  searchParams: Promise<{ email?: string }>
+  searchParams: Promise<{ email?: string; expired?: string }>
 }
 
 export default async function VerifyPage({ searchParams }: Props) {
-  const { email: rawEmail } = await searchParams
+  const { email: rawEmail, expired } = await searchParams
 
   // Prefer the URL param; fall back to the session email (handles page refresh)
   let email = rawEmail ? decodeURIComponent(rawEmail) : ''
@@ -16,5 +16,5 @@ export default async function VerifyPage({ searchParams }: Props) {
     email = user?.email ?? ''
   }
 
-  return <VerifyEmailBox email={email} />
+  return <VerifyEmailBox email={email} expired={!!expired} />
 }

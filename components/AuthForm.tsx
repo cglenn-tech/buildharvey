@@ -1,10 +1,11 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { getBrowserClient } from '@/lib/supabase-browser'
 
 type Mode = 'signup' | 'signin'
+type Stage = 'idle' | 'creating'
 
 export default function AuthForm() {
   const router = useRouter()
@@ -12,25 +13,40 @@ export default function AuthForm() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
+  const [stage, setStage] = useState<Stage>('idle')
+  const [showSlowCreating, setShowSlowCreating] = useState(false)
+  const slowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const showPassword = email.includes('@') && email.includes('.')
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (loading) return
+    if (stage !== 'idle') return
     setError('')
-    setLoading(true)
 
     const supabase = getBrowserClient()
 
     try {
       if (mode === 'signup') {
+        setStage('creating')
+        setShowSlowCreating(false)
+        slowTimerRef.current = setTimeout(() => setShowSlowCreating(true), 8000)
+
+        const t0 = Date.now()
+        console.log('[signup] started', { email, t: t0 })
+
         const { data, error: signUpError } = await supabase.auth.signUp({
           email,
           password,
           options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
         })
+
+        console.log('[signup] supabase responded', { elapsed: Date.now() - t0, error: signUpError?.message })
+
+        if (slowTimerRef.current) {
+          clearTimeout(slowTimerRef.current)
+          slowTimerRef.current = null
+        }
 
         if (signUpError) {
           console.error('[signup] error', {
@@ -44,7 +60,14 @@ export default function AuthForm() {
 
           if (msg.toLowerCase().includes('already registered') ||
               msg.toLowerCase().includes('user already registered')) {
-            setError('This account may already exist. Sign in or resend verification.')
+            console.log('[signup] duplicate detected, auto-resending', { email })
+            fetch('/api/auth/resend', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ email }),
+            }).catch(() => {})
+            router.push(`/verify?email=${encodeURIComponent(email)}`)
+            return
           } else if (signUpError.status === 429 || msg.toLowerCase().includes('rate')) {
             setError('Too many attempts. Please wait a moment and try again.')
           } else if (
@@ -61,6 +84,7 @@ export default function AuthForm() {
         }
 
         if (data.user) {
+          console.log('[signup] navigating to verify', { email })
           router.push(`/verify?email=${encodeURIComponent(email)}`)
         }
       } else {
@@ -81,9 +105,16 @@ export default function AuthForm() {
         router.refresh()
       }
     } finally {
-      setLoading(false)
+      setStage('idle')
+      setShowSlowCreating(false)
     }
   }
+
+  const buttonText = stage === 'creating'
+    ? 'Creating account…'
+    : mode === 'signup'
+    ? 'Continue'
+    : 'Sign in'
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-white">
@@ -118,15 +149,17 @@ export default function AuthForm() {
 
           <button
             type="submit"
-            disabled={loading || !showPassword}
+            disabled={stage !== 'idle' || !showPassword}
             className="w-full bg-neutral-900 text-white rounded px-3 py-2 text-sm font-medium disabled:opacity-40"
           >
-            {loading
-              ? 'Please wait…'
-              : mode === 'signup'
-              ? 'Continue'
-              : 'Sign in'}
+            {buttonText}
           </button>
+
+          {showSlowCreating && (
+            <p className="text-sm text-neutral-500 mt-2">
+              Still creating… this is taking a moment.
+            </p>
+          )}
         </form>
 
         <p className="mt-4 text-sm text-neutral-500">

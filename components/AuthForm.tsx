@@ -60,13 +60,30 @@ export default function AuthForm() {
 
           if (msg.toLowerCase().includes('already registered') ||
               msg.toLowerCase().includes('user already registered')) {
-            console.log('[signup] duplicate detected, auto-resending', { email })
-            fetch('/api/auth/resend', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ email }),
-            }).catch(() => {})
-            router.push(`/verify?email=${encodeURIComponent(email)}`)
+            console.log('[signup] duplicate detected, attempting sign in to check verification status', { email })
+            // Try signing in with the password they just entered.
+            // If it succeeds the email is already verified — session just wasn't
+            // set (common when the verification link was clicked on a different
+            // device and the response cookies were lost).
+            const { error: signInError } = await supabase.auth.signInWithPassword({ email, password })
+            if (!signInError) {
+              console.log('[signup] auto sign-in succeeded, already verified')
+              router.refresh()
+              return
+            }
+            if (signInError.message.toLowerCase().includes('email not confirmed')) {
+              // Account exists but genuinely unverified — resend and go to verify
+              console.log('[signup] account unverified, auto-resending', { email })
+              fetch('/api/auth/resend', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email }),
+              }).catch(() => {})
+              router.push(`/verify?email=${encodeURIComponent(email)}`)
+              return
+            }
+            // Wrong password or other sign-in error — account exists, can't auto-recover
+            setError('An account with this email already exists. Use "Sign in" to access it.')
             return
           } else if (signUpError.status === 429 || msg.toLowerCase().includes('rate')) {
             setError('Too many attempts. Please wait a moment and try again.')

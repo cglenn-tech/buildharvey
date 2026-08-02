@@ -19,6 +19,18 @@ import context as ctx_module
 import entities as entities_mod
 import ocr
 
+# Apps that must never generate Episodes.
+# The agent itself and OS-level UIs are excluded to prevent "BuildHarvey" or
+# "loginwindow" from appearing as case names in the Episode Engine.
+_SYSTEM_APPS = frozenset({
+    '', 'loginwindow', 'SystemPreferences', 'System Preferences',
+    'System Settings', 'Spotlight', 'Dock', 'Finder',
+    'SecurityAgent', 'UserNotificationCenter',
+    'BuildHarvey',      # the agent itself (macOS)
+    'Task Manager',     # Windows
+    'Explorer',         # Windows File Explorer
+})
+
 
 @dataclass
 class Observation:
@@ -167,3 +179,38 @@ def _domain(url: str) -> str:
         return urlparse(url).netloc
     except Exception:
         return ""
+
+
+def is_user_work(obs: 'Observation') -> bool:
+    """
+    Returns True only if this observation represents real user work.
+
+    System events, session lifecycle, and agent-internal activity
+    never return True and therefore never enter the Episode Engine.
+    This is the primary filter; the garbage name list in database.py
+    is a secondary defensive filter.
+    """
+    if not obs:
+        return False
+    app = (obs.app or '').strip()
+    if app in _SYSTEM_APPS:
+        return False
+    if not app and not obs.window_title:
+        return False
+    if 'buildharvey' in app.lower():
+        return False
+    return True
+
+
+def reset() -> None:
+    """
+    Reset observer state after a capture exception (e.g. after system sleep/wake).
+    capture.py creates a fresh mss context per call so no mss reset is needed;
+    this clears the diff baseline so the next frame is always treated as changed.
+    """
+    global _last_app, _last_url_domain, _last_ocr_len, _last_saved_at
+    _last_app = ""
+    _last_url_domain = ""
+    _last_ocr_len = 0
+    _last_saved_at = 0.0
+    print("[observer] state reset after error")

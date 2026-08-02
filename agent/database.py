@@ -10,6 +10,9 @@ from episode import Episode, KeyObservation
 
 def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(str(config.DB_PATH))
+    # WAL mode: allows concurrent reads while writing, survives crashes cleanly.
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA synchronous=NORMAL')
     _migrate(conn)
     return conn
 

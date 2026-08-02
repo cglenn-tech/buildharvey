@@ -104,6 +104,9 @@ class Episode:
     last_meaningful_evidence_at: float = field(default_factory=time.time)
     _objective: str = ""
 
+    # Evidence screenshot paths that survived finalization (to be uploaded)
+    evidence_paths: list[str] = field(default_factory=list)
+
     # Legacy field kept for compatibility
     entity_counts: dict[str, int] = field(default_factory=dict)
 
@@ -150,6 +153,8 @@ class Episode:
         """
         Canonical representation sent to Supabase and consumed by the report generator.
         Contains only finalized key observations — no raw data, no images.
+        evidence_paths is included for the sync worker to upload screenshots;
+        it is not stored in Supabase episodes table.
         """
         return {
             "id": self.id,
@@ -159,6 +164,7 @@ class Episode:
             "duration_minutes": self.duration_minutes,
             "key_observations": [o.to_dict() for o in self.key_observations],
             "created_at": self.created_at,
+            "evidence_paths": list(self.evidence_paths),
         }
 
 

@@ -22,6 +22,7 @@ import AppKit
 import objc
 import auth
 import permissions
+import session_server
 
 
 class OnboardingController(AppKit.NSObject):
@@ -176,8 +177,26 @@ class OnboardingController(AppKit.NSObject):
 class AppDelegate(AppKit.NSObject):
 
     _onboarding = objc.ivar()
+    _stop_event = objc.ivar()
 
     def applicationDidFinishLaunching_(self, notification):
+        self._stop_event = threading.Event()
+
+        # Register for macOS sleep and session-resign notifications
+        nc = AppKit.NSWorkspace.sharedWorkspace().notificationCenter()
+        nc.addObserver_selector_name_object_(
+            self,
+            objc.selector(self.workspaceSleep_, signature=b'v@:@'),
+            AppKit.NSWorkspaceWillSleepNotification,
+            None,
+        )
+        nc.addObserver_selector_name_object_(
+            self,
+            objc.selector(self.workspaceSessionResign_, signature=b'v@:@'),
+            AppKit.NSWorkspaceSessionDidResignActiveNotification,
+            None,
+        )
+
         credential = auth.read_credential()
         if credential:
             status = permissions.check()
@@ -188,16 +207,30 @@ class AppDelegate(AppKit.NSObject):
         else:
             self._show_onboarding('connect_account')
 
+    def workspaceSleep_(self, notification):
+        self._emergency_stop()
+
+    def workspaceSessionResign_(self, notification):
+        self._emergency_stop()
+
+    def _emergency_stop(self):
+        """Called on sleep or session resign. Stops recording immediately."""
+        session_server.force_stop()
+        if self._stop_event is not None:
+            self._stop_event.set()
+
     def _show_onboarding(self, initial_state='connect_account'):
         self._onboarding = OnboardingController.alloc().init()
         self._onboarding._set_state(initial_state)
 
     def startAgent(self):
+        if self._stop_event is not None:
+            self._stop_event.clear()
         threading.Thread(target=self._run_agent, daemon=True).start()
 
     def _run_agent(self):
         import main as agent_main
-        agent_main.main()
+        agent_main.main(stop_event=self._stop_event)
 
     def applicationShouldTerminateAfterLastWindowClosed_(self, app):
         return False

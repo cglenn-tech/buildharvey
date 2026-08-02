@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 
 type State =
@@ -28,6 +28,14 @@ function triggerDownload(url: string) {
   document.body.removeChild(a)
 }
 
+function detectPlatform(): 'macos' | 'windows' | 'other' {
+  if (typeof navigator === 'undefined') return 'other'
+  const ua = navigator.userAgent.toLowerCase()
+  if (ua.includes('win')) return 'windows'
+  if (ua.includes('mac')) return 'macos'
+  return 'other'
+}
+
 interface Props {
   version: string
   sha256: string
@@ -36,6 +44,11 @@ interface Props {
 export default function DownloadButton({ version, sha256 }: Props) {
   const router = useRouter()
   const [state, setState] = useState<State>({ status: 'idle' })
+  const [platform, setPlatform] = useState<'macos' | 'windows' | 'other'>('other')
+
+  useEffect(() => {
+    setPlatform(detectPlatform())
+  }, [])
 
   async function handleDownload() {
     if (state.status === 'preparing') return
@@ -80,7 +93,7 @@ export default function DownloadButton({ version, sha256 }: Props) {
   const buttonLabel =
     state.status === 'preparing' ? 'Preparing download…'
     : state.status === 'failed'  ? 'Try again'
-    : 'Download for Mac'
+    : 'Download BuildHarvey'
 
   const buttonDisabled =
     state.status === 'preparing' || state.status === 'unavailable'
@@ -102,13 +115,29 @@ export default function DownloadButton({ version, sha256 }: Props) {
       {state.status === 'started' && (
         <div className="mt-4 text-sm text-neutral-700 space-y-1">
           <p>Your download has started.</p>
-          <p>Open the downloaded file and move BuildHarvey to Applications.</p>
+          {platform === 'windows' ? (
+            <>
+              <p>Extract the zip, then run BuildHarvey.exe to start a work session.</p>
+              <p className="text-neutral-500 text-xs mt-1">
+                No installation required. No startup entries created.
+              </p>
+              <p className="text-neutral-500 text-xs mt-1">
+                If Windows shows a SmartScreen warning, click{' '}
+                <strong>More info</strong> then <strong>Run anyway</strong>.
+              </p>
+            </>
+          ) : (
+            <>
+              <p>Open the DMG, drag BuildHarvey to Applications.</p>
+              <p className="text-neutral-500 text-xs mt-1">
+                On first open: right-click BuildHarvey → <strong>Open</strong> →{' '}
+                <strong>Open</strong> to bypass Gatekeeper.
+              </p>
+            </>
+          )}
           <p className="mt-2 text-neutral-500 text-xs">
             If your download didn&apos;t start:{' '}
-            <a
-              href={state.url}
-              className="underline text-neutral-900"
-            >
+            <a href={state.url} className="underline text-neutral-900">
               Download BuildHarvey
             </a>
           </p>

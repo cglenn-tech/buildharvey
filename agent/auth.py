@@ -20,54 +20,31 @@ import urllib.error
 from typing import Optional
 
 import config
+from os_adapters import Adapter as _Adapter
 
-# Keychain service name for stored credential
-_KEYCHAIN_SERVICE = 'com.buildharvey.agent'
-_KEYCHAIN_ACCOUNT = 'device-token'
+_adapter = _Adapter()
 
 
-# ── Keychain ──────────────────────────────────────────────────────────────────
+# ── Credential storage (delegated to platform adapter) ────────────────────────
 
 def read_credential() -> Optional[str]:
-    """Read device token from macOS Keychain. Returns hex string or None."""
-    try:
-        result = subprocess.run(
-            [
-                'security', 'find-generic-password',
-                '-s', _KEYCHAIN_SERVICE,
-                '-a', _KEYCHAIN_ACCOUNT,
-                '-w',
-            ],
-            capture_output=True,
-            text=True,
-        )
-        token = result.stdout.strip()
-        return token if token else None
-    except Exception:
-        return None
+    """Read device token from platform credential store. Returns hex string or None."""
+    return _adapter.read_credential(account='device-token')
 
 
 def store_credential(raw_token_hex: str) -> None:
-    """Store device token in macOS Keychain, replacing any existing entry."""
-    # Delete existing entry first (ignore errors if not found)
-    subprocess.run(
-        [
-            'security', 'delete-generic-password',
-            '-s', _KEYCHAIN_SERVICE,
-            '-a', _KEYCHAIN_ACCOUNT,
-        ],
-        capture_output=True,
-    )
-    subprocess.run(
-        [
-            'security', 'add-generic-password',
-            '-s', _KEYCHAIN_SERVICE,
-            '-a', _KEYCHAIN_ACCOUNT,
-            '-w', raw_token_hex,
-            '-U',
-        ],
-        check=True,
-    )
+    """Store device token in platform credential store, replacing any existing entry."""
+    _adapter.store_credential(raw_token_hex, account='device-token')
+
+
+def read_user_id() -> Optional[str]:
+    """Read the stored user_id (UUID) associated with this device."""
+    return _adapter.read_credential(account='user-id')
+
+
+def store_user_id(user_id: str) -> None:
+    """Store the user_id alongside the device token for WebSocket identity validation."""
+    _adapter.store_credential(user_id, account='user-id')
 
 
 # ── Token helpers ──────────────────────────────────────────────────────────────
@@ -121,9 +98,10 @@ def activate(device_name: str = 'My Mac') -> Optional[str]:
         print("[auth] no activation_id in response")
         return None
 
-    # Step 3: Open browser
+    # Step 3: Open browser (cross-platform)
     activate_url = f"{config.BASE_URL}/activate?id={activation_id}"
-    subprocess.run(['open', activate_url], check=False)
+    import webbrowser
+    webbrowser.open(activate_url)
     print(f"[auth] opened browser: {activate_url}")
 
     # Step 4: Poll for approval
@@ -140,6 +118,9 @@ def activate(device_name: str = 'My Mac') -> Optional[str]:
             })
             status = poll_resp.get('status')
             if status == 'approved':
+                user_id = poll_resp.get('user_id')
+                if user_id:
+                    store_user_id(user_id)
                 return raw_device_token_hex
             elif status == 'expired':
                 print("[auth] activation expired")

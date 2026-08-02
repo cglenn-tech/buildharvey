@@ -41,8 +41,13 @@ def _get_nlp():
     global _nlp
     if _nlp is None:
         try:
-            import spacy
-            _nlp = spacy.load("en_core_web_sm")
+            import sys, os, spacy
+            if getattr(sys, 'frozen', False):
+                # PyInstaller bundle: load from vendored path
+                model_path = os.path.join(sys._MEIPASS, 'vendor', 'en_core_web_sm')
+                _nlp = spacy.load(model_path)
+            else:
+                _nlp = spacy.load("en_core_web_sm")
             print("[entities] spaCy model loaded")
         except OSError:
             print("[entities] WARNING: spaCy model missing. Run: python -m spacy download en_core_web_sm")

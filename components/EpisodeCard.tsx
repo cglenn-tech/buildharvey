@@ -2,15 +2,12 @@
 
 import { useState } from "react";
 import type { Episode } from "@/lib/types";
+import { fmt12Range } from "@/lib/fmt";
 
 type Props = {
   episode: Episode;
   onDelete: (id: string) => void;
 };
-
-function fmtTime(iso: string): string {
-  return new Date(iso).toLocaleString("en-US", { hour: "2-digit", minute: "2-digit" });
-}
 
 function fmtDuration(minutes: number): string {
   if (!minutes || minutes < 1) return "< 1m";
@@ -29,7 +26,7 @@ export default function EpisodeCard({ episode, onDelete }: Props) {
     onDelete(episode.id);
   }
 
-  const time = `${fmtTime(episode.started_at)} – ${fmtTime(episode.ended_at)}`;
+  const time = fmt12Range(episode.started_at, episode.ended_at);
   const duration = fmtDuration(episode.duration_minutes);
 
   if (!expanded) {

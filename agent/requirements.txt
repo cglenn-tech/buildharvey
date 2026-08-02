@@ -7,3 +7,4 @@ pyobjc-framework-Quartz>=10.0
 python-dotenv
 spacy
 anthropic
+websockets

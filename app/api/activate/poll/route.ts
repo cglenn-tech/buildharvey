@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
   const admin = getAdminClient()
   const { data: activation } = await admin
     .from('device_activations')
-    .select('polling_verifier, expires_at, approved_at')
+    .select('polling_verifier, expires_at, approved_at, approved_by')
     .eq('id', activation_id)
     .single()
 
@@ -57,5 +57,5 @@ export async function POST(request: NextRequest) {
     return Response.json({ status: 'pending' })
   }
 
-  return Response.json({ status: 'approved' })
+  return Response.json({ status: 'approved', user_id: activation.approved_by })
 }

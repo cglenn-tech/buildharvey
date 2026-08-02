@@ -1,0 +1,27 @@
+# Windows-specific dependencies (in addition to shared requirements)
+# Install with: pip install -r requirements_windows.txt
+#
+# Note: pyobjc packages from requirements.txt must NOT be installed on Windows.
+# Use this file on Windows; use requirements.txt only on macOS.
+
+mss
+Pillow
+numpy
+python-dotenv
+spacy
+anthropic
+websockets
+
+# Windows credential storage
+keyring
+
+# Windows screen context
+pywin32
+psutil
+pywinauto
+
+# Windows OCR (pytesseract + bundled Tesseract binary — see build_windows.spec)
+pytesseract
+
+# PyInstaller for packaging
+pyinstaller

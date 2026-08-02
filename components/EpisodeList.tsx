@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { Episode, Season, DayGroup } from "@/lib/types";
 import EpisodeCard from "./EpisodeCard";
+import { fmt12Date } from "@/lib/fmt";
 
 type Props = {
   initialEpisodes: Episode[];
@@ -84,7 +85,7 @@ export default function EpisodeList({ initialEpisodes }: Props) {
             {season.days.map((day) => (
               <div key={day.date}>
                 <p className="px-6 py-2 text-xs font-medium text-neutral-400 bg-neutral-50 border-b border-neutral-100">
-                  {day.label}
+                  {fmt12Date(day.date + "T12:00:00Z")}
                 </p>
                 <div className="divide-y divide-neutral-100">
                   {day.episodes.map((ep) => (

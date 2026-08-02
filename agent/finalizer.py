@@ -16,24 +16,55 @@ summarized the work — not browser history. Synthesize. Connect. Reconstruct.
 """
 import base64
 import json
+import shutil
 from pathlib import Path
 
 import config
 import observations as obs_mod
 from episode import Episode, KeyObservation, RawObservation, ScreenshotEvidence
 
+# Directory for evidence screenshots that survive finalization
+EVIDENCE_BASE = config.BASE_DIR / "evidence"
+EVIDENCE_BASE.mkdir(exist_ok=True)
+
 
 def finalize(episode: Episode) -> None:
     """
     Process a closed episode in place.
-    Sets episode.key_observations, then clears all buffers.
-    Screenshots are always deleted regardless of success or failure.
+    Sets episode.key_observations and episode.evidence_paths.
+    Selected screenshots are moved to ~/.buildharvey/evidence/<episode_id>/.
+    All other tmp screenshots are deleted.
     """
     try:
         key_obs = _generate_observations(episode)
         episode.key_observations = key_obs
     finally:
-        _cleanup_screenshots(episode._raw_observations)
+        # Collect all screenshot paths from both evidence and raw observations
+        all_paths: list[str] = []
+        seen: set[str] = set()
+
+        for ev in episode._evidence:
+            if ev.screenshot_path and ev.screenshot_path not in seen:
+                seen.add(ev.screenshot_path)
+                all_paths.append(ev.screenshot_path)
+
+        for r in episode._raw_observations:
+            if r.screenshot_path and r.screenshot_path not in seen:
+                seen.add(r.screenshot_path)
+                all_paths.append(r.screenshot_path)
+
+        # Select representative screenshots to preserve as evidence
+        selected = _select_screenshots_from_paths(all_paths)
+        episode.evidence_paths = _move_to_evidence(episode.id, selected)
+
+        # Delete everything that wasn't selected
+        for path in all_paths:
+            if path not in selected:
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
         episode._raw_observations = []
         # Do not clear _evidence — the caller may inspect it before discard
 
@@ -368,7 +399,41 @@ def _deduplicate(raw: list[RawObservation]) -> list[RawObservation]:
     return result
 
 
-# ── Screenshot cleanup ─────────────────────────────────────────────────────────
+# ── Evidence screenshot management ────────────────────────────────────────────
+
+def _select_screenshots_from_paths(paths: list[str]) -> list[str]:
+    """Select up to MAX_VISION_SCREENSHOTS paths, evenly distributed."""
+    if not paths:
+        return []
+    n = config.MAX_VISION_SCREENSHOTS
+    if len(paths) <= n:
+        return list(paths)
+    indices = [int(round(i * (len(paths) - 1) / (n - 1))) for i in range(n)]
+    return [paths[i] for i in indices]
+
+
+def _move_to_evidence(episode_id: str, paths: list[str]) -> list[str]:
+    """
+    Move selected screenshots to ~/.buildharvey/evidence/<episode_id>/.
+    Returns list of new paths. Files that fail to move are skipped silently.
+    """
+    dest_dir = EVIDENCE_BASE / episode_id
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    moved: list[str] = []
+    for i, src in enumerate(paths):
+        src_path = Path(src)
+        if not src_path.exists():
+            continue
+        dest = dest_dir / f"frame_{i:03d}{src_path.suffix}"
+        try:
+            shutil.move(str(src_path), str(dest))
+            moved.append(str(dest))
+        except Exception as e:
+            print(f"[finalizer] could not move {src}: {e}")
+    return moved
+
+
+# ── Screenshot cleanup (legacy) ────────────────────────────────────────────────
 
 def _cleanup_screenshots(raw: list[RawObservation]) -> None:
     """Delete all screenshot files associated with this episode's observations."""

@@ -2,11 +2,19 @@ import { redirect } from 'next/navigation'
 import { getServerClient } from '@/lib/supabase-server'
 import { getAdminClient } from '@/lib/supabase-admin'
 import type { Episode } from '@/lib/types'
-import EpisodeList from '@/components/EpisodeList'
-import ReportGenerator from '@/components/ReportGenerator'
+import HomepageClient from '@/components/HomepageClient'
+import type { WeekSummaryData } from '@/components/ThisWeekSummary'
 import AuthForm from '@/components/AuthForm'
 
 export const dynamic = 'force-dynamic'
+
+function isoMonday(d: Date): string {
+  const day = d.getDay()
+  const diff = day === 0 ? -6 : 1 - day
+  const mon = new Date(d)
+  mon.setDate(d.getDate() + diff)
+  return mon.toISOString().slice(0, 10)
+}
 
 export default async function Home() {
   const supabase = await getServerClient()
@@ -47,7 +55,7 @@ export default async function Home() {
     redirect('/download')
   }
 
-  // Authenticated with device → show homepage
+  // Authenticated with device → fetch episodes
   const { data } = await admin
     .from('episodes')
     .select('*')
@@ -55,6 +63,34 @@ export default async function Home() {
     .order('started_at', { ascending: false })
 
   const episodes = (data as Episode[]) ?? []
+
+  // Calculate this-week running totals (deterministic — no LLM)
+  const today = new Date().toISOString().slice(0, 10)
+  const monday = isoMonday(new Date())
+
+  const weekEpisodes = episodes.filter((ep) => {
+    const epDate = ep.started_at.slice(0, 10)
+    return epDate >= monday && epDate <= today
+  })
+
+  const matterMap: Record<string, number> = {}
+  for (const ep of weekEpisodes) {
+    const key = ep.case_name?.trim() || 'Unknown'
+    matterMap[key] = (matterMap[key] ?? 0) + ep.duration_minutes
+  }
+
+  const matterTotals = Object.entries(matterMap)
+    .sort((a, b) => b[1] - a[1])
+    .map(([title, minutes]) => ({ title, isAdmin: false, minutes }))
+
+  const totalMinutes = matterTotals.reduce((s, m) => s + m.minutes, 0)
+
+  const weekSummary: WeekSummaryData = {
+    matters: matterTotals,
+    caseMinutes: totalMinutes,
+    adminMinutes: 0,
+    totalMinutes,
+  }
 
   return (
     <main className="max-w-2xl mx-auto px-6 py-10">
@@ -64,12 +100,7 @@ export default async function Home() {
           Work captured by case. Generate a report when you&apos;re ready.
         </p>
       </div>
-
-      <div className="mb-10">
-        <ReportGenerator />
-      </div>
-
-      <EpisodeList initialEpisodes={episodes} />
+      <HomepageClient episodes={episodes} weekSummary={weekSummary} />
     </main>
   )
 }

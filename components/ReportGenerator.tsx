@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 
 function isoMonday(d: Date): string {
   const day = d.getDay();
@@ -22,13 +22,42 @@ export default function ReportGenerator() {
   const [to, setTo] = useState(isoSunday(todayMonday));
   const [report, setReport] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Load previously saved report when date range changes
+  const loadSaved = useCallback(async (periodStart: string, periodEnd: string) => {
+    setLoading(true);
+    setReport(null);
+    setSaved(false);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/report?periodStart=${periodStart}&periodEnd=${periodEnd}`
+      );
+      if (res.ok) {
+        const json = await res.json();
+        if (json?.content) {
+          setReport(json.content);
+          setSaved(true);
+        }
+      }
+    } catch {
+      // Non-fatal: silently skip pre-fill if load fails
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadSaved(from, to);
+  }, [from, to, loadSaved]);
 
   function setThisWeek() {
     const mon = isoMonday(new Date());
     setFrom(mon);
     setTo(isoSunday(mon));
-    setReport(null);
   }
 
   function setLastWeek() {
@@ -37,12 +66,12 @@ export default function ReportGenerator() {
     const mon = lastMon.toISOString().slice(0, 10);
     setFrom(mon);
     setTo(isoSunday(mon));
-    setReport(null);
   }
 
   async function generate() {
     setGenerating(true);
     setReport(null);
+    setSaved(false);
     setError(null);
     try {
       const res = await fetch("/api/report", {
@@ -61,6 +90,7 @@ export default function ReportGenerator() {
       }
       if (json.error) throw new Error(json.error);
       setReport(json.report ?? "");
+      setSaved(true);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Unknown error");
     } finally {
@@ -97,7 +127,7 @@ export default function ReportGenerator() {
         </div>
         <button
           onClick={generate}
-          disabled={generating || !from || !to}
+          disabled={generating || loading || !from || !to}
           className="text-sm font-medium bg-neutral-900 text-white px-4 py-1.5 rounded
                      hover:bg-neutral-700 transition-colors disabled:opacity-40"
         >
@@ -126,14 +156,23 @@ export default function ReportGenerator() {
         <p className="mt-3 text-xs text-red-500">{error}</p>
       )}
 
+      {loading && (
+        <p className="mt-3 text-xs text-neutral-400">Loading saved report…</p>
+      )}
+
       {report && (
         <div className="mt-5 pt-5 border-t border-neutral-100">
           <div className="flex items-center justify-between mb-3">
-            <p className="text-xs font-semibold uppercase tracking-widest text-neutral-400">
-              Weekly Report
-            </p>
+            <div className="flex items-center gap-2">
+              <p className="text-xs font-semibold uppercase tracking-widest text-neutral-400">
+                Weekly Report
+              </p>
+              {saved && (
+                <span className="text-xs text-neutral-400">· Saved</span>
+              )}
+            </div>
             <button
-              onClick={() => setReport(null)}
+              onClick={() => { setReport(null); setSaved(false); }}
               className="text-xs text-neutral-400 hover:text-neutral-700"
             >
               Dismiss

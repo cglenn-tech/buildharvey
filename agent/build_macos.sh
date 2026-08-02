@@ -14,8 +14,13 @@ VERSION="${BUILD_VERSION:-1.0.0}"
 IDENTITY="${APPLE_IDENTITY:-}"
 
 echo "==> Building with PyInstaller (version ${VERSION})"
+ICON_ARG=""
+if [ -f "assets/icon.icns" ]; then
+  ICON_ARG="--icon=assets/icon.icns"
+fi
+# shellcheck disable=SC2086
 pyinstaller --clean --name BuildHarvey --windowed \
-  --icon=assets/icon.icns \
+  $ICON_ARG \
   --osx-bundle-identifier com.buildharvey.agent \
   --info-plist Info.plist \
   app.py

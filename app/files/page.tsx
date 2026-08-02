@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { getServerClient } from "@/lib/supabase-server";
 import { fmt12Date } from "@/lib/fmt";
 import type { Episode } from "@/lib/types";
+import AppNav from "@/components/AppNav";
 
 export const dynamic = "force-dynamic";
 
@@ -83,7 +84,9 @@ export default async function FilesPage() {
   const episodes: Episode[] = episodesResult.data ?? [];
 
   return (
-    <main className="max-w-2xl mx-auto px-6 py-10 space-y-12">
+    <>
+      <AppNav />
+      <main className="max-w-2xl mx-auto px-6 py-10 space-y-12">
       <h1 className="text-lg font-semibold">My Files</h1>
 
       {/* Weekly Reports */}
@@ -138,5 +141,6 @@ export default async function FilesPage() {
         )}
       </section>
     </main>
+    </>
   );
 }

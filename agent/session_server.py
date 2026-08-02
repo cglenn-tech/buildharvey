@@ -1,27 +1,39 @@
 """
 Local WebSocket session server.
 
-The BuildHarvey web page connects to ws://localhost:39291 while open.
-Connection present → recording allowed.
-No connection for > IDLE_TIMEOUT_SECONDS → agent idles.
+Protocol:
+  Browser → Agent:
+    {"type": "auth", "user_id": "<uid>"}   — must be first message (3 s timeout)
+    {"type": "start"}                       — begin a work session / recording
+    {"type": "stop"}                        — end the work session / recording
+  Agent → Browser:
+    {"type": "status", "state": "<state>"} — sent on connect and on state change
+      states: "idle" | "recording"
 
-Uses asyncio + websockets library. Runs in a background daemon thread.
-Never contacts Supabase or the cloud to determine recording state.
-Cloud availability does not affect idle/recording decisions.
+Recording is NOT automatic on connect.
+The browser must send {"type": "start"} to activate the recording loop.
 """
 import asyncio
 import json
 import threading
-import time
 from typing import Optional, Set
 
 AGENT_PORT = 39291
-IDLE_TIMEOUT_SECONDS = 600  # 10 minutes
 
 _lock = threading.Lock()
 _clients: Set = set()
-_last_seen: float = 0.0   # monotonic time of last client disconnect
 
+# threading.Event for cross-thread recording control
+_recording_event = threading.Event()
+
+# Current state string broadcast to browsers
+_current_state: str = 'idle'
+
+# The server's event loop — stored so main.py can schedule broadcasts
+_event_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _get_stored_user_id() -> Optional[str]:
     try:
@@ -31,8 +43,19 @@ def _get_stored_user_id() -> Optional[str]:
         return None
 
 
-async def _handler(websocket):
-    # Require an auth message within 3 seconds
+async def _broadcast_status() -> None:
+    msg = json.dumps({'type': 'status', 'state': _current_state})
+    for ws in list(_clients):
+        try:
+            await ws.send(msg)
+        except Exception:
+            pass
+
+
+# ── WebSocket handler ─────────────────────────────────────────────────────────
+
+async def _handler(websocket) -> None:
+    # Require auth message within 3 seconds
     try:
         raw = await asyncio.wait_for(websocket.recv(), timeout=3.0)
         data = json.loads(raw)
@@ -40,55 +63,79 @@ async def _handler(websocket):
         await websocket.close(code=4001, reason='auth_required')
         return
 
-    stored_user_id = _get_stored_user_id()
-    received_user_id = data.get('user_id') if isinstance(data, dict) else None
+    if not isinstance(data, dict) or data.get('type') != 'auth':
+        await websocket.close(code=4001, reason='auth_required')
+        return
 
-    # Only enforce identity check when a user_id has been stored (post-activation)
+    stored_user_id = _get_stored_user_id()
+    received_user_id = data.get('user_id')
     if stored_user_id and stored_user_id != received_user_id:
         await websocket.close(code=4001, reason='unauthorized')
         return
 
-    if data.get('type') != 'auth':
-        await websocket.close(code=4001, reason='auth_required')
-        return
-
+    # Auth passed — register and send current state
     with _lock:
         _clients.add(websocket)
+    await websocket.send(json.dumps({'type': 'status', 'state': _current_state}))
+
     try:
-        async for _ in websocket:
-            pass   # presence of connection is the signal; messages are ignored
+        async for raw_msg in websocket:
+            try:
+                msg = json.loads(raw_msg)
+                mtype = msg.get('type')
+                if mtype == 'start':
+                    _recording_event.set()
+                    # main.py will broadcast 'recording' once capture actually starts
+                elif mtype == 'stop':
+                    _recording_event.clear()
+                    await websocket.send(json.dumps({'type': 'status', 'state': 'idle'}))
+            except Exception:
+                pass
     finally:
         with _lock:
             _clients.discard(websocket)
-            global _last_seen
-            _last_seen = time.monotonic()
+        # Stop recording when the last browser tab disconnects
+        if not _clients:
+            _recording_event.clear()
 
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def is_browser_active() -> bool:
+    """Kept for backward compatibility. Prefer is_recording_active()."""
+    with _lock:
+        return bool(_clients)
+
+
+def is_recording_active() -> bool:
     """
-    Returns True while at least one browser tab is connected,
-    OR within IDLE_TIMEOUT_SECONDS of the last disconnect.
-    Returns False only after the timeout has elapsed with no connections.
-    Network/cloud availability does not affect this result.
+    True when a browser tab is connected AND the user has started a work session.
+    Used by main.py to gate the capture loop.
     """
     with _lock:
-        if _clients:
-            return True
-        if _last_seen == 0.0:
-            return False   # never connected — stay idle
-        return (time.monotonic() - _last_seen) < IDLE_TIMEOUT_SECONDS
+        return _recording_event.is_set() and bool(_clients)
+
+
+def set_status(state: str) -> None:
+    """
+    Called from main.py's thread to broadcast the current recording state
+    to all connected browser tabs. Thread-safe.
+    """
+    global _current_state
+    _current_state = state
+    loop = _event_loop
+    if loop is not None and not loop.is_closed():
+        asyncio.run_coroutine_threadsafe(_broadcast_status(), loop)
 
 
 def force_stop() -> None:
     """
     Immediately invalidate the session.
-    Called by emergency stop (lock, logout, sleep, disconnect).
-    After this, is_browser_active() returns False until a new client connects.
+    Called on lock, logout, sleep, or Windows session disconnect.
     """
+    _recording_event.clear()
     with _lock:
         _clients.clear()
-        global _last_seen
-        _last_seen = 0.0  # Reset to 'never connected' — no grace period
 
 
 def start() -> None:
@@ -98,8 +145,14 @@ def start() -> None:
     print(f'[session] WebSocket server on ws://localhost:{AGENT_PORT}')
 
 
+# ── Internal server ───────────────────────────────────────────────────────────
+
 def _run_server() -> None:
-    asyncio.run(_serve())
+    global _event_loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    _event_loop = loop
+    loop.run_until_complete(_serve())
 
 
 async def _serve() -> None:

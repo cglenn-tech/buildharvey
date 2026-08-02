@@ -283,9 +283,7 @@ export async function POST(request: Request) {
   );
 
   if (reportable.length === 0) {
-    return Response.json({
-      report: `Reporting period: ${periodLabel}\n\nNo work episodes found for this period.`,
-    });
+    return Response.json({ error: 'no_episodes' }, { status: 422 });
   }
 
   // ── Phase 1: Claude groups episodes (JSON only, no math) ──────────────────
@@ -374,23 +372,33 @@ ${episodesSummary}`;
   };
 
   // Persist report to DB
+  let savedId: string | null = null;
   try {
-    await supabase.from("weekly_reports").insert({
-      user_id: user.id,
-      week_start: periodStart,
-      week_end: periodEnd,
-      period_start: periodStart,
-      period_end: periodEnd,
-      period_label: periodLabel,
-      source_episode_ids: reportable.map((e) => e.id),
-      summary_json: summaryJson,
-      content: report,
-      version: 1,
-    });
+    const { data: savedReport, error: saveErr } = await supabase
+      .from("weekly_reports")
+      .insert({
+        user_id: user.id,
+        week_start: periodStart,
+        week_end: periodEnd,
+        period_start: periodStart,
+        period_end: periodEnd,
+        period_label: periodLabel,
+        source_episode_ids: reportable.map((e) => e.id),
+        summary_json: summaryJson,
+        content: report,
+        version: 1,
+      })
+      .select('id')
+      .single();
+    if (saveErr) {
+      console.error("[report] failed to save to DB:", saveErr);
+    } else {
+      savedId = savedReport?.id ?? null;
+    }
   } catch (saveErr) {
     // Non-fatal: report still returned to client even if DB write fails
     console.error("[report] failed to save to DB:", saveErr);
   }
 
-  return Response.json({ report });
+  return Response.json({ report, id: savedId });
 }

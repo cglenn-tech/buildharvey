@@ -1,6 +1,6 @@
 'use client'
 
-import AgentConnection from './AgentConnection'
+import AgentStatusCard from './AgentStatusCard'
 import ReportGenerator from './ReportGenerator'
 import EpisodeList from './EpisodeList'
 import ThisWeekSummary from './ThisWeekSummary'
@@ -15,7 +15,7 @@ type Props = {
 export default function HomepageClient({ episodes, weekSummary }: Props) {
   return (
     <>
-      <AgentConnection />
+      <AgentStatusCard />
       <ThisWeekSummary data={weekSummary} />
       <div className="mb-10">
         <ReportGenerator />

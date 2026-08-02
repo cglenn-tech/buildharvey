@@ -5,7 +5,7 @@ Run:  python main.py
       (or launched automatically by app.py after credential and permissions are set up)
 
 Loop:
-  1. Check if browser is connected (WebSocket session gate).
+  1. Check if a work session is active (browser connected + user clicked Start).
   2. Capture screen → extract context → build Observation.
   3. If screenshot available and API key configured: analyze with Claude Vision.
      Engine decides: continue current episode, open new, or transition.
@@ -13,10 +13,10 @@ Loop:
   5. On episode close: finalize → persist to SQLite → enqueue server sync.
 
 Session gate:
-  - Agent only records while at least one BuildHarvey browser tab is connected.
-  - After the last tab closes, a 10-minute grace period allows brief interruptions.
-  - After 10 minutes with no browser: active episode is finalized, agent idles.
-  - Agent resumes on reconnect — no duplicate episodes.
+  - Agent only records while the browser has an active work session.
+  - The browser must send {"type": "start"} to begin recording.
+  - When the user clicks Stop (or the last tab disconnects), recording ends immediately.
+  - Active episode is finalized on stop.
 
 Startup:
   - Mark locally invalid episodes (not deleted — just flagged).
@@ -67,6 +67,8 @@ def main(
     engine = EpisodeEngine()
     sync.start()
 
+    _ws_state = 'idle'  # tracks last state broadcast to session_server
+
     while True:
         if stop_event is not None and stop_event.is_set():
             print("[agent] stop_event set — shutting down")
@@ -75,7 +77,10 @@ def main(
                 _close_and_save(conn, engine.active)
             break
         try:
-            if session_server.is_browser_active():
+            if session_server.is_recording_active():
+                if _ws_state != 'recording':
+                    session_server.set_status('recording')
+                    _ws_state = 'recording'
                 if state_callback:
                     state_callback('recording' if engine.active else 'waiting')
                 try:
@@ -88,11 +93,14 @@ def main(
                         pass
                 time.sleep(config.CAPTURE_INTERVAL_SECONDS)
             else:
-                # Browser has been absent for > 10 min — finalize and idle
+                # No active work session — finalize and idle
                 if engine.active:
                     engine.active.close()
                     _close_and_save(conn, engine.active)
                     engine.active = None
+                if _ws_state != 'idle':
+                    session_server.set_status('idle')
+                    _ws_state = 'idle'
                 if state_callback:
                     state_callback('idle')
                 time.sleep(30)   # check every 30s while idle

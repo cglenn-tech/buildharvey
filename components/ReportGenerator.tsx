@@ -24,14 +24,18 @@ export default function ReportGenerator() {
   const [generating, setGenerating] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [reportId, setReportId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [noEpisodes, setNoEpisodes] = useState(false);
 
   // Load previously saved report when date range changes
   const loadSaved = useCallback(async (periodStart: string, periodEnd: string) => {
     setLoading(true);
     setReport(null);
     setSaved(false);
+    setReportId(null);
     setError(null);
+    setNoEpisodes(false);
     try {
       const res = await fetch(
         `/api/report?periodStart=${periodStart}&periodEnd=${periodEnd}`
@@ -41,6 +45,7 @@ export default function ReportGenerator() {
         if (json?.content) {
           setReport(json.content);
           setSaved(true);
+          setReportId(json.id ?? null);
         }
       }
     } catch {
@@ -72,7 +77,9 @@ export default function ReportGenerator() {
     setGenerating(true);
     setReport(null);
     setSaved(false);
+    setReportId(null);
     setError(null);
+    setNoEpisodes(false);
     try {
       const res = await fetch("/api/report", {
         method: "POST",
@@ -82,15 +89,20 @@ export default function ReportGenerator() {
           weekEnd: to + "T23:59:59Z",
         }),
       });
-      let json: { error?: string; report?: string };
+      let json: { error?: string; report?: string; id?: string };
       try {
         json = await res.json();
       } catch {
         throw new Error(`Server error (${res.status})`);
       }
+      if (res.status === 422 && json.error === 'no_episodes') {
+        setNoEpisodes(true);
+        return;
+      }
       if (json.error) throw new Error(json.error);
       setReport(json.report ?? "");
       setSaved(true);
+      setReportId(json.id ?? null);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Unknown error");
     } finally {
@@ -156,6 +168,12 @@ export default function ReportGenerator() {
         <p className="mt-3 text-xs text-red-500">{error}</p>
       )}
 
+      {noEpisodes && !report && (
+        <p className="mt-3 text-xs text-neutral-500">
+          No work episodes found for this period.
+        </p>
+      )}
+
       {loading && (
         <p className="mt-3 text-xs text-neutral-400">Loading saved report…</p>
       )}
@@ -163,12 +181,20 @@ export default function ReportGenerator() {
       {report && (
         <div className="mt-5 pt-5 border-t border-neutral-100">
           <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <p className="text-xs font-semibold uppercase tracking-widest text-neutral-400">
                 Weekly Report
               </p>
               {saved && (
                 <span className="text-xs text-neutral-400">· Saved</span>
+              )}
+              {saved && reportId && (
+                <a
+                  href="/files"
+                  className="text-xs text-neutral-400 hover:text-neutral-700 underline"
+                >
+                  Open in My Files
+                </a>
               )}
             </div>
             <button

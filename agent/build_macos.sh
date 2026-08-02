@@ -22,7 +22,6 @@ fi
 pyinstaller --clean --name BuildHarvey --windowed \
   $ICON_ARG \
   --osx-bundle-identifier com.buildharvey.agent \
-  --info-plist Info.plist \
   app.py
 
 # ── Code signing ─────────────────────────────────────────────────────────────

@@ -1,10 +1,12 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import { useRouter } from 'next/navigation'
 import { useSearchParams } from 'next/navigation'
 import { Suspense } from 'react'
 
 function ActivateContent() {
+  const router = useRouter()
   const searchParams = useSearchParams()
   const activationId = searchParams.get('id') ?? ''
 
@@ -47,7 +49,7 @@ function ActivateContent() {
         setStatus('error')
         return
       }
-      setStatus('connected')
+      router.push('/')
     } catch {
       setErrorMsg('Request failed. Try again.')
       setStatus('ready')

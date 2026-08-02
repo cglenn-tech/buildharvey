@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation'
 import { getServerClient } from '@/lib/supabase-server'
 import { getAdminClient } from '@/lib/supabase-admin'
 import DownloadButton from '@/components/DownloadButton'
+import DownloadFocusRecheck from '@/components/DownloadFocusRecheck'
 
 export const dynamic = 'force-dynamic'
 
@@ -23,6 +24,20 @@ export default async function DownloadPage() {
   }
 
   const admin = getAdminClient()
+
+  // If this user already has a connected device, send them straight to the dashboard.
+  const { data: existingDevice } = await admin
+    .from('devices')
+    .select('id')
+    .eq('user_id', user.id)
+    .is('revoked_at', null)
+    .limit(1)
+    .single()
+
+  if (existingDevice) {
+    redirect('/')
+  }
+
   const { data: releases } = await admin
     .from('app_releases')
     .select('version, sha256')
@@ -35,6 +50,7 @@ export default async function DownloadPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-white">
+      <DownloadFocusRecheck />
       <div className="max-w-sm px-6 w-full">
         <h1 className="text-lg font-semibold text-neutral-900 mb-1">BuildHarvey</h1>
         <h2 className="text-base font-medium text-neutral-900 mb-2">
@@ -54,7 +70,7 @@ export default async function DownloadPage() {
 
             <details className="mt-6">
               <summary className="text-xs text-neutral-400 cursor-pointer">
-                Verify download
+                View file checksum
               </summary>
               <p className="text-xs font-mono text-neutral-400 mt-1 break-all">
                 SHA-256: {release.sha256}

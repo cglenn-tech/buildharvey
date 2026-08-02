@@ -39,7 +39,7 @@ import config
 import database
 import finalizer
 import observer
-import session_server
+import realtime_client
 import sync
 import vision
 from episode import Episode
@@ -55,7 +55,7 @@ def main(
     if not config.ANTHROPIC_API_KEY:
         print("[agent] WARNING: ANTHROPIC_API_KEY not set — running in degraded mode (no episodes)")
 
-    session_server.start()
+    realtime_client.start()
 
     conn = database.connect()
 
@@ -67,7 +67,7 @@ def main(
     engine = EpisodeEngine()
     sync.start()
 
-    _ws_state = 'idle'  # tracks last state broadcast to session_server
+    _ws_state = 'idle'  # tracks last state broadcast to realtime_client
 
     while True:
         if stop_event is not None and stop_event.is_set():
@@ -77,9 +77,9 @@ def main(
                 _close_and_save(conn, engine.active)
             break
         try:
-            if session_server.is_recording_active():
+            if realtime_client.is_recording_active():
                 if _ws_state != 'recording':
-                    session_server.set_status('recording')
+                    realtime_client.set_status('recording')
                     _ws_state = 'recording'
                 if state_callback:
                     state_callback('recording' if engine.active else 'waiting')
@@ -99,7 +99,7 @@ def main(
                     _close_and_save(conn, engine.active)
                     engine.active = None
                 if _ws_state != 'idle':
-                    session_server.set_status('idle')
+                    realtime_client.set_status('idle')
                     _ws_state = 'idle'
                 if state_callback:
                     state_callback('idle')

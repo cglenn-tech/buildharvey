@@ -1,125 +1,194 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import type { RealtimeChannel } from '@supabase/supabase-js'
 import { getBrowserClient } from '@/lib/supabase-browser'
 
-const AGENT_WS_URL = 'ws://localhost:39291'
-const RECONNECT_INTERVAL = 5_000
+type CardState =
+  | 'connecting'    // subscribed to channel, waiting for agent presence (≤5 s)
+  | 'unavailable'   // no agent in channel after 5 s, or channel error
+  | 'idle'          // agent present, not recording
+  | 'recording'     // agent present, recording active
+  | 'stopping'      // stop sent, waiting for agent confirmation
+  | 'sync_pending'  // agent finished recording, syncing episode
+  | 'error'         // unexpected failure
 
-type ConnState = 'connecting' | 'idle' | 'recording' | 'disconnected'
+const STATE_LABELS: Record<CardState, string> = {
+  connecting: 'Connecting',
+  unavailable: 'Desktop app unavailable',
+  idle: 'Ready to start',
+  recording: 'Recording',
+  stopping: 'Stopping',
+  sync_pending: 'Sync pending',
+  error: 'Error',
+}
 
-export default function AgentStatusCard() {
-  const [connState, setConnState] = useState<ConnState>('connecting')
-  const wsRef = useRef<WebSocket | null>(null)
+const DOT_COLORS: Record<CardState, string> = {
+  connecting: 'bg-neutral-300',
+  unavailable: 'bg-neutral-300',
+  idle: 'bg-green-400',
+  recording: 'bg-red-500 animate-pulse',
+  stopping: 'bg-yellow-400',
+  sync_pending: 'bg-yellow-400',
+  error: 'bg-red-400',
+}
+
+type Props = { deviceId: string }
+
+export default function AgentStatusCard({ deviceId }: Props) {
+  const [state, setState] = useState<CardState>('connecting')
+  const channelRef = useRef<RealtimeChannel | null>(null)
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
-    let destroyed = false
-    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    const supabase = getBrowserClient()
+    const topic = `buildharvey:device:${deviceId}`
 
-    function scheduleReconnect() {
-      if (!destroyed) {
-        setConnState('disconnected')
-        retryTimer = setTimeout(connect, RECONNECT_INTERVAL)
+    const channel = supabase.channel(topic, {
+      config: {
+        broadcast: { ack: false, self: false },
+        presence: { key: 'browser' },
+        private: true,
+      },
+    })
+    channelRef.current = channel
+
+    // ── 5-second timeout: if no agent appears, show unavailable ──────────────
+    timeoutRef.current = setTimeout(() => {
+      setState((prev) => (prev === 'connecting' ? 'unavailable' : prev))
+    }, 5000)
+
+    function clearConnectingTimeout() {
+      if (timeoutRef.current !== null) {
+        clearTimeout(timeoutRef.current)
+        timeoutRef.current = null
       }
     }
 
-    async function connect() {
-      if (destroyed) return
-
-      let userId: string | null = null
-      try {
-        const supabase = getBrowserClient()
-        const { data: { session } } = await supabase.auth.getSession()
-        userId = session?.user?.id ?? null
-      } catch {
-        scheduleReconnect()
-        return
+    // ── Status broadcast from agent ───────────────────────────────────────────
+    channel.on('broadcast', { event: 'status' }, ({ payload }) => {
+      const agentState: string = payload?.state ?? ''
+      if (agentState === 'recording') {
+        clearConnectingTimeout()
+        setState('recording')
+      } else if (agentState === 'idle') {
+        clearConnectingTimeout()
+        setState('idle')
+      } else if (agentState === 'stopping') {
+        setState('stopping')
+      } else if (agentState === 'sync_pending') {
+        setState('sync_pending')
       }
+    })
 
-      if (!userId) {
-        scheduleReconnect()
-        return
+    // ── Presence: detect agent ────────────────────────────────────────────────
+    channel.on('presence', { event: 'sync' }, () => {
+      const presenceState = channel.presenceState<{ type: string }>()
+      const agentPresent = Object.values(presenceState)
+        .flat()
+        .some((p) => p.type === 'agent')
+
+      if (agentPresent) {
+        clearConnectingTimeout()
+        // Request the agent's current status so we know whether it's idle/recording
+        channel.send({ type: 'broadcast', event: 'status_request', payload: {} })
+      } else {
+        // Agent left or not yet joined
+        setState((prev) => {
+          if (prev === 'connecting') return prev  // still waiting
+          return 'unavailable'
+        })
       }
+    })
 
-      try {
-        const ws = new WebSocket(AGENT_WS_URL)
-        wsRef.current = ws
-
-        ws.onopen = () => {
-          ws.send(JSON.stringify({ type: 'auth', user_id: userId }))
-        }
-
-        ws.onmessage = (ev) => {
-          try {
-            const msg = JSON.parse(ev.data as string)
-            if (msg.type === 'status') {
-              setConnState(msg.state === 'recording' ? 'recording' : 'idle')
-            }
-          } catch {
-            // ignore malformed messages
-          }
-        }
-
-        ws.onclose = () => {
-          wsRef.current = null
-          scheduleReconnect()
-        }
-
-        ws.onerror = () => ws.close()
-      } catch {
-        scheduleReconnect()
+    channel.on('presence', { event: 'join' }, ({ newPresences }) => {
+      const agentJoined = (newPresences as Array<{ type: string }>).some(
+        (p) => p.type === 'agent'
+      )
+      if (agentJoined) {
+        clearConnectingTimeout()
+        // Ask agent for its current state
+        channel.send({ type: 'broadcast', event: 'status_request', payload: {} })
       }
-    }
+    })
 
-    connect()
+    channel.on('presence', { event: 'leave' }, ({ leftPresences }) => {
+      const agentLeft = (leftPresences as Array<{ type: string }>).some(
+        (p) => p.type === 'agent'
+      )
+      if (agentLeft) {
+        const presenceState = channel.presenceState<{ type: string }>()
+        const agentStillPresent = Object.values(presenceState)
+          .flat()
+          .some((p) => p.type === 'agent')
+        if (!agentStillPresent) {
+          setState('unavailable')
+        }
+      }
+    })
+
+    // ── Subscribe ─────────────────────────────────────────────────────────────
+    channel.subscribe(async (status) => {
+      if (status === 'SUBSCRIBED') {
+        await channel.track({ type: 'browser' })
+        // Check if agent is already in the channel
+        const presenceState = channel.presenceState<{ type: string }>()
+        const agentPresent = Object.values(presenceState)
+          .flat()
+          .some((p) => p.type === 'agent')
+        if (agentPresent) {
+          clearConnectingTimeout()
+          channel.send({ type: 'broadcast', event: 'status_request', payload: {} })
+        }
+      } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+        clearConnectingTimeout()
+        setState('error')
+      }
+    })
 
     return () => {
-      destroyed = true
-      if (retryTimer !== null) clearTimeout(retryTimer)
-      wsRef.current?.close()
-      wsRef.current = null
+      clearConnectingTimeout()
+      supabase.removeChannel(channel)
+      channelRef.current = null
     }
-  }, [])
+  }, [deviceId])
 
   function sendStart() {
-    wsRef.current?.send(JSON.stringify({ type: 'start' }))
+    setState('connecting')  // wait for agent's recording confirmation
+    channelRef.current?.send({ type: 'broadcast', event: 'start', payload: {} })
   }
 
   function sendStop() {
-    wsRef.current?.send(JSON.stringify({ type: 'stop' }))
+    setState('stopping')
+    channelRef.current?.send({ type: 'broadcast', event: 'stop', payload: {} })
   }
 
-  if (connState === 'connecting') {
-    return (
-      <div className="border border-neutral-200 rounded-xl p-5 mb-6">
-        <div className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-neutral-300 inline-block" />
-          <p className="text-sm text-neutral-400">Connecting…</p>
-        </div>
-      </div>
-    )
-  }
+  const label = STATE_LABELS[state]
+  const dotColor = DOT_COLORS[state]
 
-  if (connState === 'disconnected') {
+  if (state === 'unavailable') {
     return (
       <div className="border border-neutral-200 rounded-xl p-5 mb-6">
         <div className="flex items-center gap-2 mb-1">
-          <span className="w-2 h-2 rounded-full bg-neutral-300 inline-block" />
-          <p className="text-sm font-medium text-neutral-500">Agent not running</p>
+          <span className={`w-2 h-2 rounded-full inline-block ${dotColor}`} />
+          <p className="text-sm font-medium text-neutral-500">{label}</p>
         </div>
         <p className="text-xs text-neutral-400">
-          Open BuildHarvey on your Mac to start recording.
+          Open BuildHarvey on your Mac to start recording.{' '}
+          <a href="/download" className="underline hover:text-neutral-600">
+            Download
+          </a>
         </p>
       </div>
     )
   }
 
-  if (connState === 'idle') {
+  if (state === 'idle') {
     return (
       <div className="border border-neutral-200 rounded-xl p-5 mb-6">
         <div className="flex items-center gap-2 mb-3">
-          <span className="w-2 h-2 rounded-full bg-green-400 inline-block" />
-          <p className="text-sm font-medium text-neutral-700">Agent connected · Idle</p>
+          <span className={`w-2 h-2 rounded-full inline-block ${dotColor}`} />
+          <p className="text-sm font-medium text-neutral-700">{label}</p>
         </div>
         <button
           onClick={sendStart}
@@ -132,20 +201,31 @@ export default function AgentStatusCard() {
     )
   }
 
-  // recording
+  if (state === 'recording') {
+    return (
+      <div className="border border-neutral-200 rounded-xl p-5 mb-6">
+        <div className="flex items-center gap-2 mb-3">
+          <span className={`w-2 h-2 rounded-full inline-block ${dotColor}`} />
+          <p className="text-sm font-medium text-neutral-700">{label}</p>
+        </div>
+        <button
+          onClick={sendStop}
+          className="text-sm text-neutral-600 border border-neutral-200 px-4 py-1.5 rounded
+                     hover:bg-neutral-50 transition-colors"
+        >
+          Stop Work Session
+        </button>
+      </div>
+    )
+  }
+
+  // connecting / stopping / sync_pending / error — status-only display
   return (
     <div className="border border-neutral-200 rounded-xl p-5 mb-6">
-      <div className="flex items-center gap-2 mb-3">
-        <span className="w-2 h-2 rounded-full bg-red-500 inline-block animate-pulse" />
-        <p className="text-sm font-medium text-neutral-700">Recording</p>
+      <div className="flex items-center gap-2">
+        <span className={`w-2 h-2 rounded-full inline-block ${dotColor}`} />
+        <p className="text-sm text-neutral-500">{label}</p>
       </div>
-      <button
-        onClick={sendStop}
-        className="text-sm text-neutral-600 border border-neutral-200 px-4 py-1.5 rounded
-                   hover:bg-neutral-50 transition-colors"
-      >
-        Stop Work Session
-      </button>
     </div>
   )
 }

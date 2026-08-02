@@ -22,7 +22,7 @@ import AppKit
 import objc
 import auth
 import permissions
-import session_server
+import realtime_client
 
 
 class OnboardingController(AppKit.NSObject):
@@ -215,7 +215,7 @@ class AppDelegate(AppKit.NSObject):
 
     def _emergency_stop(self):
         """Called on sleep or session resign. Stops recording immediately."""
-        session_server.force_stop()
+        realtime_client.force_stop()
         if self._stop_event is not None:
             self._stop_event.set()
 

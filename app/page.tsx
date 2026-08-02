@@ -56,6 +56,8 @@ export default async function Home() {
     redirect('/download')
   }
 
+  const deviceId = devices[0].id
+
   // Authenticated with device → fetch episodes
   const { data } = await admin
     .from('episodes')
@@ -102,7 +104,7 @@ export default async function Home() {
             Work captured by case. Generate a report when you&apos;re ready.
           </p>
         </div>
-        <HomepageClient episodes={episodes} weekSummary={weekSummary} />
+        <HomepageClient episodes={episodes} weekSummary={weekSummary} deviceId={deviceId} />
       </main>
     </>
   )

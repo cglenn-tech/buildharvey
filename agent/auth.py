@@ -43,8 +43,18 @@ def read_user_id() -> Optional[str]:
 
 
 def store_user_id(user_id: str) -> None:
-    """Store the user_id alongside the device token for WebSocket identity validation."""
+    """Store the user_id alongside the device token."""
     _adapter.store_credential(user_id, account='user-id')
+
+
+def read_device_id() -> Optional[str]:
+    """Read the stored device_id (UUID) for this device."""
+    return _adapter.read_credential(account='device-id')
+
+
+def store_device_id(device_id: str) -> None:
+    """Store the device_id after first successful /api/realtime/token fetch."""
+    _adapter.store_credential(device_id, account='device-id')
 
 
 # ── Token helpers ──────────────────────────────────────────────────────────────

@@ -10,12 +10,13 @@ import type { Episode } from '@/lib/types'
 type Props = {
   episodes: Episode[]
   weekSummary: WeekSummaryData
+  deviceId: string
 }
 
-export default function HomepageClient({ episodes, weekSummary }: Props) {
+export default function HomepageClient({ episodes, weekSummary, deviceId }: Props) {
   return (
     <>
-      <AgentStatusCard />
+      <AgentStatusCard deviceId={deviceId} />
       <ThisWeekSummary data={weekSummary} />
       <div className="mb-10">
         <ReportGenerator />

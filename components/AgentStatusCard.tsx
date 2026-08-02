@@ -33,6 +33,15 @@ const DOT_COLORS: Record<CardState, string> = {
   error: 'bg-red-400',
 }
 
+type BuildHarveyPresence = {
+  type?: 'agent' | 'browser'
+}
+
+function isAgentPresence(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  return (value as BuildHarveyPresence).type === 'agent'
+}
+
 type Props = { deviceId: string }
 
 export default function AgentStatusCard({ deviceId }: Props) {
@@ -83,10 +92,10 @@ export default function AgentStatusCard({ deviceId }: Props) {
 
     // ── Presence: detect agent ────────────────────────────────────────────────
     channel.on('presence', { event: 'sync' }, () => {
-      const presenceState = channel.presenceState<{ type: string }>()
+      const presenceState = channel.presenceState()
       const agentPresent = Object.values(presenceState)
         .flat()
-        .some((p) => p.type === 'agent')
+        .some(isAgentPresence)
 
       if (agentPresent) {
         clearConnectingTimeout()
@@ -102,9 +111,7 @@ export default function AgentStatusCard({ deviceId }: Props) {
     })
 
     channel.on('presence', { event: 'join' }, ({ newPresences }) => {
-      const agentJoined = (newPresences as Array<{ type: string }>).some(
-        (p) => p.type === 'agent'
-      )
+      const agentJoined = newPresences.some(isAgentPresence)
       if (agentJoined) {
         clearConnectingTimeout()
         // Ask agent for its current state
@@ -113,14 +120,12 @@ export default function AgentStatusCard({ deviceId }: Props) {
     })
 
     channel.on('presence', { event: 'leave' }, ({ leftPresences }) => {
-      const agentLeft = (leftPresences as Array<{ type: string }>).some(
-        (p) => p.type === 'agent'
-      )
+      const agentLeft = leftPresences.some(isAgentPresence)
       if (agentLeft) {
-        const presenceState = channel.presenceState<{ type: string }>()
+        const presenceState = channel.presenceState()
         const agentStillPresent = Object.values(presenceState)
           .flat()
-          .some((p) => p.type === 'agent')
+          .some(isAgentPresence)
         if (!agentStillPresent) {
           setState('unavailable')
         }
@@ -132,10 +137,10 @@ export default function AgentStatusCard({ deviceId }: Props) {
       if (status === 'SUBSCRIBED') {
         await channel.track({ type: 'browser' })
         // Check if agent is already in the channel
-        const presenceState = channel.presenceState<{ type: string }>()
+        const presenceState = channel.presenceState()
         const agentPresent = Object.values(presenceState)
           .flat()
-          .some((p) => p.type === 'agent')
+          .some(isAgentPresence)
         if (agentPresent) {
           clearConnectingTimeout()
           channel.send({ type: 'broadcast', event: 'status_request', payload: {} })

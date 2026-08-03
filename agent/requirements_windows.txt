@@ -3,12 +3,14 @@
 #
 # Note: pyobjc packages from requirements.txt must NOT be installed on Windows.
 # Use this file on Windows; use requirements.txt only on macOS.
+#
+# spaCy is intentionally excluded. Claude Vision handles all episode classification.
+# The regex entity patterns in entities.py work without spaCy.
 
 mss
 Pillow
 numpy
 python-dotenv
-spacy
 anthropic
 websockets
 realtime>=2.0.0

@@ -25,19 +25,6 @@ export default async function DownloadPage() {
 
   const admin = getAdminClient()
 
-  // If this user already has a connected device, send them straight to the dashboard.
-  const { data: existingDevice } = await admin
-    .from('devices')
-    .select('id')
-    .eq('user_id', user.id)
-    .is('revoked_at', null)
-    .limit(1)
-    .single()
-
-  if (existingDevice) {
-    redirect('/')
-  }
-
   const { data: releases } = await admin
     .from('app_releases')
     .select('version, sha256')

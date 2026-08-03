@@ -2,7 +2,15 @@
 Windows entry point — tkinter UI with full recording state machine.
 
 States:
-  not_connected → connecting → waiting → recording → grace_period → idle → error
+  not_connected  → agent has no credential stored
+  connecting     → activation flow in progress
+  ready_to_start → credential obtained, agent running, waiting for Start click
+  recording      → local recording active
+  stopping       → session being finalized (waiting for main.py to idle)
+  error          → unexpected failure
+
+The user clicks Start Work Session / Stop Work Session in this window.
+The browser website is optional — closing it does NOT stop recording.
 
 Bundled OCR paths are configured BEFORE any imports that use OCR,
 so pytesseract finds tesseract.exe inside the PyInstaller bundle.
@@ -26,18 +34,23 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import auth
-import session_server
+import realtime_client
 from os_adapters import Adapter
 
 _LABELS = {
-    'not_connected':  'Connect your BuildHarvey account to get started.',
-    'connecting':     'Opening browser for account connection…',
-    'waiting':        'Open buildharvey.com to begin recording.',
-    'recording':      'Recording — observing your work.',
-    'grace_period':   'Browser closed — recording pauses in 10 minutes.',
-    'idle':           'Paused. Open buildharvey.com to resume.',
-    'error':          'Error — see log for details.',
-    'sync_pending':   'Recording — syncing completed work.',
+    'not_connected':   'Connect your BuildHarvey account to get started.',
+    'connecting':      'Opening browser for account connection…',
+    'ready_to_start':  'Ready to start. Click Start Work Session to begin capturing your work.',
+    'recording':       'BuildHarvey is recording your work.',
+    'stopping':        'Finishing session…',
+    'error':           'Error — see log for details.',
+}
+
+_PRIMARY_BUTTONS = {
+    'not_connected':   'Connect Account',
+    'error':           'Retry',
+    'ready_to_start':  'Start Work Session',
+    'recording':       'Stop Work Session',
 }
 
 
@@ -70,14 +83,14 @@ class WindowsApp:
         self._stop_event = threading.Event()
         self._root = tk.Tk()
         self._root.title('BuildHarvey')
-        self._root.geometry('420x160')
+        self._root.geometry('440x180')
         self._root.resizable(False, False)
 
         self._label_var = tk.StringVar(value=_LABELS['not_connected'])
         tk.Label(
             self._root,
             textvariable=self._label_var,
-            wraplength=380,
+            wraplength=400,
             justify='left',
             padx=20,
             pady=20,
@@ -87,7 +100,7 @@ class WindowsApp:
             self._root,
             text='Connect Account',
             command=self._primary_action,
-            width=20,
+            width=24,
         )
         self._btn.pack()
         self._update_ui()
@@ -98,44 +111,60 @@ class WindowsApp:
 
     def _update_ui(self) -> None:
         self._label_var.set(_LABELS.get(self._state, self._state))
-        if self._state in ('not_connected', 'error'):
-            text = 'Connect Account' if self._state == 'not_connected' else 'Retry'
-            self._btn.config(text=text, state='normal')
-            self._btn.pack()
-        elif self._state == 'connecting':
-            self._btn.config(state='disabled')
+        btn_text = _PRIMARY_BUTTONS.get(self._state)
+        if btn_text:
+            self._btn.config(
+                text=btn_text,
+                state='disabled' if self._state == 'connecting' else 'normal',
+            )
             self._btn.pack()
         else:
+            # connecting / stopping — hide button
             self._btn.pack_forget()
 
     def _primary_action(self) -> None:
-        if self._state == 'not_connected':
+        state = self._state
+        if state == 'not_connected':
             self._set_state('connecting')
             threading.Thread(target=self._run_activation, daemon=True).start()
-        elif self._state == 'error':
+        elif state == 'error':
             self._set_state('not_connected')
             self._update_ui()
+        elif state == 'ready_to_start':
+            realtime_client.start_local()
+            self._set_state('recording')
+        elif state == 'recording':
+            realtime_client.stop_local()
+            self._set_state('stopping')
 
     def _run_activation(self) -> None:
         import platform as _platform
         token = auth.activate(device_name=_platform.node() or 'My PC')
         if token:
             self._adapter.store_credential(token)
-            self._set_state('waiting')
+            self._set_state('ready_to_start')
             threading.Thread(target=self._run_agent, daemon=True).start()
         else:
             self._set_state('not_connected')
 
     def _emergency_stop(self) -> None:
         """Called immediately on lock/logout/disconnect. Stops recording."""
-        session_server.force_stop()
+        realtime_client.force_stop()
         self._stop_event.set()
-        self._set_state('idle')
+        self._set_state('ready_to_start')
+
+    def _agent_state_update(self, state: str) -> None:
+        """Called from main.py state_callback."""
+        if state == 'idle' and self._state == 'stopping':
+            self._set_state('ready_to_start')
+        elif state == 'idle' and self._state == 'recording':
+            # Recording stopped unexpectedly (OS event, error, etc.)
+            self._set_state('ready_to_start')
 
     def _run_agent(self) -> None:
         import main as agent_main
         self._stop_event.clear()
-        agent_main.main(state_callback=self._set_state, stop_event=self._stop_event)
+        agent_main.main(state_callback=self._agent_state_update, stop_event=self._stop_event)
 
     def run(self) -> None:
         # OCR validation on first run
@@ -152,7 +181,7 @@ class WindowsApp:
 
         cred = self._adapter.read_credential()
         if cred:
-            self._set_state('waiting')
+            self._set_state('ready_to_start')
             threading.Thread(target=self._run_agent, daemon=True).start()
 
         self._root.mainloop()

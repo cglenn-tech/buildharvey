@@ -1,4 +1,3 @@
-/* ARCHIVED: desktop-agent only — not mounted in active product */
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
@@ -11,15 +10,17 @@ type CardState =
   | 'idle'          // agent present, not recording
   | 'recording'     // agent present, recording active
   | 'stopping'      // stop sent, waiting for agent confirmation
+  | 'finalizing'    // agent finalizing episode
   | 'sync_pending'  // agent finished recording, syncing episode
   | 'error'         // unexpected failure
 
 const STATE_LABELS: Record<CardState, string> = {
-  connecting: 'Connecting',
-  unavailable: 'Desktop app unavailable',
+  connecting: 'Connecting to desktop app…',
+  unavailable: 'Desktop app not connected',
   idle: 'Ready to start',
   recording: 'Recording',
   stopping: 'Stopping',
+  finalizing: 'Finalizing',
   sync_pending: 'Sync pending',
   error: 'Error',
 }
@@ -30,6 +31,7 @@ const DOT_COLORS: Record<CardState, string> = {
   idle: 'bg-green-400',
   recording: 'bg-red-500 animate-pulse',
   stopping: 'bg-yellow-400',
+  finalizing: 'bg-yellow-400',
   sync_pending: 'bg-yellow-400',
   error: 'bg-red-400',
 }
@@ -86,6 +88,8 @@ export default function AgentStatusCard({ deviceId }: Props) {
         setState('idle')
       } else if (agentState === 'stopping') {
         setState('stopping')
+      } else if (agentState === 'finalizing') {
+        setState('finalizing')
       } else if (agentState === 'sync_pending') {
         setState('sync_pending')
       }
@@ -180,7 +184,7 @@ export default function AgentStatusCard({ deviceId }: Props) {
           <p className="text-sm font-medium text-neutral-500">{label}</p>
         </div>
         <p className="text-xs text-neutral-400">
-          Open BuildHarvey on your Mac to start recording.{' '}
+          Open the BuildHarvey desktop app to start recording.{' '}
           <a href="/download" className="underline hover:text-neutral-600">
             Download
           </a>

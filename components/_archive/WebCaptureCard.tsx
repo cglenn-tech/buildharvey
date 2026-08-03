@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useCaptureSession } from '@/lib/capture/capture-session'
+import CaptureDiagnosticsPanel from './CaptureDiagnosticsPanel'
 import type { Episode } from '@/lib/types'
 
 type Props = {
@@ -31,18 +32,25 @@ export default function WebCaptureCard({ onEpisodeSaved }: Props) {
     permanentlyFailedCount,
     surfaceWarning,
     analysisBacklogged,
+    diagnostics,
     startCapture,
     stopCapture,
+    retryOcr,
   } = useCaptureSession(onEpisodeSaved)
 
   const [isMobile, setIsMobile] = useState(false)
   const [disclosed, setDisclosed] = useState(false)
   const [mounted, setMounted] = useState(false)
+  const [showDiagnostics, setShowDiagnostics] = useState(false)
 
   useEffect(() => {
     setMounted(true)
     setIsMobile(window.matchMedia?.('(pointer: coarse)').matches ?? false)
     setDisclosed(localStorage.getItem(DISCLOSURE_KEY) === 'true')
+    setShowDiagnostics(
+      process.env.NEXT_PUBLIC_CAPTURE_DEBUG === 'true' ||
+        window.location.search.includes('captureDebug=1'),
+    )
   }, [])
 
   function handleUnderstood() {
@@ -73,7 +81,7 @@ export default function WebCaptureCard({ onEpisodeSaved }: Props) {
     )
   }
 
-  // Sync badge logic
+  // Sync badge — only shown during recording; never shows "Synced" while actively capturing
   function renderSyncBadge() {
     if (analysisBacklogged) return null
     if (syncStatus === 'syncing') {
@@ -91,7 +99,8 @@ export default function WebCaptureCard({ onEpisodeSaved }: Props) {
         </span>
       )
     }
-    if (syncStatus === 'idle' && queuedCount === 0) {
+    // Omit "Synced" badge while actively recording — it would be misleading
+    if (syncStatus === 'idle' && queuedCount === 0 && state !== 'recording') {
       return <span className="text-xs text-neutral-400 ml-2">Synced</span>
     }
     return null
@@ -132,13 +141,39 @@ export default function WebCaptureCard({ onEpisodeSaved }: Props) {
       )
     }
 
-    if (state === 'loading_ocr') {
+    if (state === 'screen_connected' || state === 'loading_ocr') {
       return (
-        <p className="text-sm text-neutral-400">Preparing work capture\u2026</p>
+        <p className="text-sm text-neutral-400">
+          Screen connected \u2014 preparing text recognition\u2026
+        </p>
+      )
+    }
+
+    if (state === 'ocr_error') {
+      return (
+        <div>
+          <p className="text-sm text-neutral-700 mb-1">
+            Screen sharing is active, but BuildHarvey cannot read the screen.
+          </p>
+          {diagnostics.lastPipelineError && (
+            <p className="text-xs text-neutral-400 mb-3 font-mono">
+              [{diagnostics.lastPipelineError.stage}]{' '}
+              {diagnostics.lastPipelineError.error.slice(0, 120)}
+            </p>
+          )}
+          <button
+            onClick={retryOcr}
+            className="text-sm font-medium bg-neutral-900 text-white px-4 py-1.5 rounded
+                       hover:bg-neutral-700 transition-colors"
+          >
+            Retry OCR
+          </button>
+        </div>
       )
     }
 
     if (state === 'recording') {
+      const hasOcrSuccess = diagnostics.ocrSuccesses > 0
       return (
         <div>
           <div className="flex items-center gap-2 mb-1">
@@ -146,7 +181,9 @@ export default function WebCaptureCard({ onEpisodeSaved }: Props) {
               className="w-2 h-2 rounded-full inline-block bg-red-500 animate-pulse"
             />
             <span className="text-sm font-medium text-neutral-800">
-              Recording work session
+              {hasOcrSuccess
+                ? 'BuildHarvey is actively reading your shared screen'
+                : 'Screen connected \u2014 reading your screen'}
             </span>
           </div>
           <div className="flex items-center">
@@ -184,13 +221,16 @@ export default function WebCaptureCard({ onEpisodeSaved }: Props) {
           <p className="text-sm text-neutral-700 mb-3">
             Session complete. Your work has been captured.
           </p>
-          <button
-            onClick={startCapture}
-            className="text-sm font-medium bg-neutral-900 text-white px-4 py-1.5 rounded
-                       hover:bg-neutral-700 transition-colors"
-          >
-            Start New Session
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={startCapture}
+              className="text-sm font-medium bg-neutral-900 text-white px-4 py-1.5 rounded
+                         hover:bg-neutral-700 transition-colors"
+            >
+              Start New Session
+            </button>
+            {renderSyncBadge()}
+          </div>
         </div>
       )
     }
@@ -249,6 +289,9 @@ export default function WebCaptureCard({ onEpisodeSaved }: Props) {
 
   return (
     <div>
+      {mounted && showDiagnostics && (
+        <CaptureDiagnosticsPanel diagnostics={diagnostics} />
+      )}
       <div className="border border-neutral-200 rounded-xl p-5 mb-6">
         {renderContent()}
       </div>

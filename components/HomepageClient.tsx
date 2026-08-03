@@ -1,21 +1,13 @@
 'use client'
 
-import { useState, useEffect, useMemo, useRef } from 'react'
-import WebCaptureCard from './WebCaptureCard'
+import { useState, useMemo } from 'react'
+import DesktopAgentCard from './DesktopAgentCard'
 import ReportGenerator from './ReportGenerator'
 import EpisodeList from './EpisodeList'
 import ThisWeekSummary from './ThisWeekSummary'
 import ManualEntryForm from './ManualEntryForm'
 import type { WeekSummaryData } from './ThisWeekSummary'
 import type { Episode } from '@/lib/types'
-import {
-  getActiveEpisodeSnapshot,
-  clearActiveEpisodeSnapshot,
-  putPendingEpisode,
-} from '@/lib/capture/idb-buffer'
-import { drainSyncQueue } from '@/lib/capture/sync-queue'
-import { normalizeProjectKey } from '@/lib/capture/frame-differ'
-import { MAX_EVIDENCE_SCREENSHOTS } from '@/lib/capture/constants'
 
 type Props = { episodes: Episode[] }
 
@@ -34,6 +26,10 @@ function isoMonday(d: Date): string {
   return localIsoDate(mon)
 }
 
+function normalizeProjectKey(title: string): string {
+  return title.trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
 function computeWeekSummary(episodes: Episode[]): WeekSummaryData {
   const now = new Date()
   const today = localIsoDate(now)
@@ -45,8 +41,6 @@ function computeWeekSummary(episodes: Episode[]): WeekSummaryData {
     return epDate >= monday && epDate <= today && ep.is_reportable !== false
   })
 
-  // Administrative episodes → single "Administrative" bucket
-  // Project episodes → grouped by normalized case_name
   const projectMap: Record<string, { minutes: number; displayName: string }> = {}
   let adminMinutes = 0
 
@@ -83,100 +77,6 @@ function computeWeekSummary(episodes: Episode[]): WeekSummaryData {
 
 export default function HomepageClient({ episodes: init }: Props) {
   const [episodes, setEpisodes] = useState<Episode[]>(init)
-  const isMountedRef = useRef(true)
-
-  useEffect(() => {
-    isMountedRef.current = true
-
-    async function mount() {
-      // Crash recovery: if there's an active episode snapshot, recover it
-      try {
-        const snap = await getActiveEpisodeSnapshot()
-        if (snap) {
-          const durationMs =
-            Date.parse(snap.lastMeaningfulAt) - Date.parse(snap.episode.started_at)
-          const recovered: Episode = {
-            ...snap.episode,
-            ended_at: snap.lastMeaningfulAt,
-            duration_minutes: Math.max(0, durationMs / 60000),
-            key_observations: [
-              ...(snap.episode.key_observations ?? []),
-              { timestamp: snap.lastMeaningfulAt, text: '[recovered from interruption]' },
-            ],
-          }
-
-          // Select evidence screenshots from recovered candidates
-          const allCandidates = [
-            ...snap.currentCandidates,
-            ...snap.pendingSwitchCandidates,
-          ].filter((c) => c.screenshot !== null)
-
-          const selected =
-            allCandidates.length <= MAX_EVIDENCE_SCREENSHOTS
-              ? allCandidates
-              : [
-                  allCandidates[0],
-                  allCandidates[Math.floor(allCandidates.length / 2)],
-                  allCandidates[allCandidates.length - 1],
-                ]
-
-          const evidenceBlobs = selected.map((c, i) => ({
-            dataUrl: c.screenshot!,
-            filename: `${recovered.id}-${i}.jpg`,
-            storagePath: null,
-            uploaded: false,
-            storageConfirmed: false,
-          }))
-
-          await putPendingEpisode({
-            episodeId: recovered.id,
-            episode: recovered,
-            evidenceBlobs,
-            episodeSaved: false,
-            allScreenshotsSaved: evidenceBlobs.length === 0,
-            retryCount: 0,
-            lastRetryAt: null,
-            failedPermanently: false,
-          })
-          await clearActiveEpisodeSnapshot()
-
-          if (isMountedRef.current) {
-            setEpisodes((prev) => [recovered, ...prev])
-          }
-        }
-      } catch {
-        // Non-fatal: proceed without crash recovery
-      }
-
-      // Drain any pending episodes from previous sessions
-      try {
-        const result = await drainSyncQueue()
-        if (result.syncedEpisodes.length > 0 && isMountedRef.current) {
-          setEpisodes((prev) => {
-            const map = new Map(prev.map((e) => [e.id, e]))
-            result.syncedEpisodes.forEach((e) => map.set(e.id, e))
-            return [...map.values()].sort((a, b) =>
-              b.started_at.localeCompare(a.started_at),
-            )
-          })
-        }
-      } catch {
-        // Non-fatal
-      }
-    }
-
-    mount()
-
-    const onOnline = () => {
-      drainSyncQueue().catch(() => {})
-    }
-    window.addEventListener('online', onOnline)
-
-    return () => {
-      isMountedRef.current = false
-      window.removeEventListener('online', onOnline)
-    }
-  }, [])
 
   function handleEpisodeSaved(ep: Episode) {
     setEpisodes((prev) => {
@@ -207,7 +107,7 @@ export default function HomepageClient({ episodes: init }: Props) {
 
   return (
     <>
-      <WebCaptureCard onEpisodeSaved={handleEpisodeSaved} />
+      <DesktopAgentCard />
       <ThisWeekSummary data={weekSummary} />
       <div className="mb-10">
         <ReportGenerator />

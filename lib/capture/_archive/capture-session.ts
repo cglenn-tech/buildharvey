@@ -41,8 +41,10 @@ type _SuppressUnused = Episode | KeyObservation | typeof OCR_DIFF_THRESHOLD | ty
 export type CaptureState =
   | 'ready'
   | 'requesting'
+  | 'screen_connected'    // stream acquired, OCR not yet ready
   | 'loading_ocr'
-  | 'recording'
+  | 'ocr_error'           // OCR smoke test failed OR 3+ consecutive failures
+  | 'recording'           // OCR healthy, frames being processed
   | 'stopping'
   | 'stopped'
   | 'permission_denied'
@@ -50,6 +52,32 @@ export type CaptureState =
   | 'error'
 
 export type SyncStatus = 'idle' | 'syncing' | 'queued' | 'error'
+
+export type CaptureDiagnostics = {
+  streamStatus: 'none' | 'active' | 'ended'
+  videoReadyState: number
+  videoWidth: number
+  videoHeight: number
+  framesSampled: number
+  framesSkippedByDiff: number
+  lastFrameAt: string | null
+  blobsCreated: number
+  lastBlobSizeBytes: number
+  ocrWorkerStatus: 'none' | 'initializing' | 'ready' | 'error'
+  ocrAttempts: number
+  ocrSuccesses: number
+  ocrFailures: number
+  latestOcrCharCount: number
+  latestOcrPreview: string        // first 200 chars
+  analyzeAttempts: number
+  lastAnalyzeHttpStatus: number | null
+  episodesOpened: number
+  episodesFinalized: number
+  episodesSaved: number
+  queuedEpisodes: number
+  lastPipelineError: { stage: string; error: string } | null
+  thumbnailDataUrl: string | null  // canvas.toDataURL after drawImage, diagnostics only
+}
 
 export type UseCaptureSession = {
   state: CaptureState
@@ -59,8 +87,10 @@ export type UseCaptureSession = {
   permanentlyFailedCount: number
   surfaceWarning: string | null
   analysisBacklogged: boolean
+  diagnostics: CaptureDiagnostics
   startCapture: () => Promise<void>
   stopCapture: () => Promise<void>
+  retryOcr: () => Promise<void>
   isSupported: boolean
 }
 
@@ -72,6 +102,71 @@ const isSupported =
   typeof navigator !== 'undefined' &&
   'mediaDevices' in navigator &&
   'getDisplayMedia' in (navigator.mediaDevices as unknown as Record<string, unknown>)
+
+// ---------------------------------------------------------------------------
+// initialDiagnostics
+// ---------------------------------------------------------------------------
+
+function initialDiagnostics(): CaptureDiagnostics {
+  return {
+    streamStatus: 'none',
+    videoReadyState: 0,
+    videoWidth: 0,
+    videoHeight: 0,
+    framesSampled: 0,
+    framesSkippedByDiff: 0,
+    lastFrameAt: null,
+    blobsCreated: 0,
+    lastBlobSizeBytes: 0,
+    ocrWorkerStatus: 'none',
+    ocrAttempts: 0,
+    ocrSuccesses: 0,
+    ocrFailures: 0,
+    latestOcrCharCount: 0,
+    latestOcrPreview: '',
+    analyzeAttempts: 0,
+    lastAnalyzeHttpStatus: null,
+    episodesOpened: 0,
+    episodesFinalized: 0,
+    episodesSaved: 0,
+    queuedEpisodes: 0,
+    lastPipelineError: null,
+    thumbnailDataUrl: null,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const MAX_CONSECUTIVE_OCR_FAILURES = 3
+
+// ---------------------------------------------------------------------------
+// runOcrSmokeTest — run once after worker init, before starting scheduler
+// ---------------------------------------------------------------------------
+
+async function runOcrSmokeTest(worker: Awaited<ReturnType<typeof createWorker>>): Promise<void> {
+  const c = document.createElement('canvas')
+  c.width = 400
+  c.height = 100
+  const ctx = c.getContext('2d')!
+  ctx.fillStyle = 'white'
+  ctx.fillRect(0, 0, 400, 100)
+  ctx.fillStyle = 'black'
+  ctx.font = '24px Arial'
+  ctx.fillText('BuildHarvey OCR Test', 10, 50)
+  const blob = await new Promise<Blob>((resolve, reject) =>
+    c.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error('smoke_blob_failed'))),
+      'image/png',
+    ),
+  )
+  const {
+    data: { text },
+  } = await worker.recognize(blob)
+  const passed = /BuildHarvey|OCR|Test/i.test(text)
+  if (!passed) throw new Error(`smoke_test_failed: got "${text.slice(0, 80)}"`)
+}
 
 // ---------------------------------------------------------------------------
 // Hook
@@ -99,9 +194,12 @@ export function useCaptureSession(
   const lastCaptureAtRef = useRef(0)
   const schedulerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const diagTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const startTimeRef = useRef(0)
   const isMountedRef = useRef(true)
   const pendingAnalysisCountRef = useRef(0)
+  const consecutiveOcrFailuresRef = useRef(0)
+  const diagRef = useRef<CaptureDiagnostics>(initialDiagnostics())
 
   // Use a ref to track current state for use inside closures/cleanup
   const stateRef = useRef<CaptureState>('ready')
@@ -114,6 +212,8 @@ export function useCaptureSession(
   const [permanentlyFailedCount, setPermanentlyFailedCount] = useState(0)
   const [surfaceWarning, setSurfaceWarning] = useState<string | null>(null)
   const [analysisBacklogged, setAnalysisBacklogged] = useState(false)
+  // diagVersion is only used to trigger re-renders so the diagnostics panel stays fresh
+  const [, setDiagVersion] = useState(0)
 
   // ---------------------------------------------------------------------------
   // Helpers
@@ -134,6 +234,22 @@ export function useCaptureSession(
           ? 'queued'
           : 'idle',
     )
+    diagRef.current.queuedEpisodes = result.remainingCount
+  }
+
+  function pauseScheduler() {
+    if (schedulerRef.current) {
+      clearInterval(schedulerRef.current)
+      schedulerRef.current = null
+    }
+  }
+
+  function resumeScheduler() {
+    if (!schedulerRef.current) {
+      schedulerRef.current = setInterval(() => {
+        scheduleTick()
+      }, FRAME_INTERVAL_MS)
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -142,12 +258,14 @@ export function useCaptureSession(
 
   async function ensureWorker() {
     if (workerRef.current) return workerRef.current
+    diagRef.current.ocrWorkerStatus = 'initializing'
     // createWorker types vary across tesseract.js versions — cast to any to
     // allow the (lang, oem, options) overload used by the self-hosted build.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const worker = await (createWorker as any)('eng', 1, {
+      workerBlobURL: false,          // prevent CDN blob-fetch fallback
       workerPath: '/tesseract/worker.min.js',
-      corePath: '/tesseract/tesseract-core.wasm.js',
+      corePath: '/tesseract/',       // directory — getCore.js detects SIMD and picks file
       langPath: '/tesseract/',
       logger:
         process.env.NODE_ENV === 'development'
@@ -155,6 +273,7 @@ export function useCaptureSession(
           : undefined,
     }) as Awaited<ReturnType<typeof createWorker>>
     workerRef.current = worker
+    diagRef.current.ocrWorkerStatus = 'ready'
     return worker
   }
 
@@ -164,6 +283,7 @@ export function useCaptureSession(
 
   async function saveEpisodeToQueue(finalized: FinalizedEpisode) {
     const { episode, selectedScreenshots, evidenceFilenames } = finalized
+    diagRef.current.episodesFinalized++
     await putPendingEpisode({
       episodeId: episode.id,
       episode,
@@ -187,6 +307,7 @@ export function useCaptureSession(
         updateSyncUI(result)
         onEpisodeSaved(episode)
       }
+      diagRef.current.episodesSaved++
     } catch {
       if (isMountedRef.current) setSyncStatus('error')
     }
@@ -205,6 +326,16 @@ export function useCaptureSession(
     const canvas = canvasRef.current
     const video = videoRef.current
 
+    // Pre-flight: video must have a valid frame
+    if (
+      video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+      video.videoWidth === 0 ||
+      video.videoHeight === 0
+    ) {
+      diagRef.current.lastPipelineError = { stage: 'preflight', error: 'video_not_ready' }
+      return
+    }
+
     if (process.env.NODE_ENV === 'development') {
       const actualInterval = Date.now() - lastCaptureAtRef.current
       console.log('[capture] tick', {
@@ -215,28 +346,67 @@ export function useCaptureSession(
     }
     lastCaptureAtRef.current = Date.now()
 
+    // Update live video dimensions in diagnostics
+    diagRef.current.videoReadyState = video.readyState
+    diagRef.current.videoWidth = video.videoWidth
+    diagRef.current.videoHeight = video.videoHeight
+
     // 1. Draw frame
     ctx.drawImage(video, 0, 0, CANVAS_WIDTH, CANVAS_HEIGHT)
     const imageData = ctx.getImageData(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT)
+
+    // Capture thumbnail at reduced quality for diagnostics panel only
+    diagRef.current.thumbnailDataUrl = canvas.toDataURL('image/jpeg', 0.15)
 
     // 2. Pixel diff
     const diffScore = prevImageDataRef.current
       ? frameDiff(prevImageDataRef.current, imageData)
       : 1
-    if (diffScore < DIFF_THRESHOLD) return
+    if (diffScore < DIFF_THRESHOLD) {
+      diagRef.current.framesSkippedByDiff++
+      return
+    }
     prevImageDataRef.current = imageData
+    diagRef.current.framesSampled++
+    diagRef.current.lastFrameAt = now
 
-    // 3. OCR
+    // 3. Convert canvas to Blob (cross-browser safe; avoids null SetImageFile in Safari)
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob((b) => resolve(b), 'image/png'),
+    )
+    if (!blob || blob.size === 0) {
+      diagRef.current.lastPipelineError = {
+        stage: 'blob_creation',
+        error: 'canvas_to_blob_failed',
+      }
+      return
+    }
+    diagRef.current.blobsCreated++
+    diagRef.current.lastBlobSizeBytes = blob.size
+
+    // 4. OCR — pass Blob instead of canvas
     const worker = workerRef.current
     if (!worker) return
     const ocrStart = Date.now()
     let ocrText: string
+    diagRef.current.ocrAttempts++
     try {
       const {
         data: { text },
-      } = await worker.recognize(canvas)
+      } = await worker.recognize(blob)
       ocrText = text.trim()
-    } catch {
+      consecutiveOcrFailuresRef.current = 0
+      diagRef.current.ocrSuccesses++
+      diagRef.current.latestOcrCharCount = ocrText.length
+      diagRef.current.latestOcrPreview = ocrText.slice(0, 200)
+    } catch (err) {
+      consecutiveOcrFailuresRef.current++
+      diagRef.current.ocrFailures++
+      diagRef.current.lastPipelineError = { stage: 'ocr_recognize', error: String(err) }
+      if (consecutiveOcrFailuresRef.current >= MAX_CONSECUTIVE_OCR_FAILURES) {
+        pauseScheduler()
+        safeSetState('ocr_error')
+      }
       return
     }
     const ocrMs = Date.now() - ocrStart
@@ -244,17 +414,17 @@ export function useCaptureSession(
     const textDiff = textJaccard(prevOcrTextRef.current, ocrText)
     prevOcrTextRef.current = ocrText
 
-    // 4. Analysis gate
+    // 5. Analysis gate
     const timeSinceAnalysis = Date.now() - lastAnalysisAtRef.current
     const shouldAnalyze =
       timeSinceAnalysis >= MIN_ANALYSIS_INTERVAL_MS ||
       textDiff >= STRONG_CHANGE_THRESHOLD
     if (!shouldAnalyze) return
 
-    // 5. Screenshot for this analysis frame
+    // 6. Screenshot for this analysis frame
     const screenshotDataUrl = canvas.toDataURL('image/jpeg', 0.7)
 
-    // 6. Build analysis request
+    // 7. Build analysis request
     const currentEp = engineRef.current.getCurrentEpisode()
     const lastMeaningfulAt = engineRef.current.getLastMeaningfulAt()
     const timeSinceMeaningful = lastMeaningfulAt
@@ -278,11 +448,12 @@ export function useCaptureSession(
         : null,
     }
 
-    // 7. Call analyze endpoint with timeout
+    // 8. Call analyze endpoint with timeout
     const ac = new AbortController()
     const timer = setTimeout(() => ac.abort(), ANALYSIS_TIMEOUT_MS)
     let res: Response
     const analyzeStart = Date.now()
+    diagRef.current.analyzeAttempts++
     try {
       res = await fetch('/api/capture/analyze', {
         method: 'POST',
@@ -299,8 +470,9 @@ export function useCaptureSession(
       clearTimeout(timer)
     }
     const analyzeMs = Date.now() - analyzeStart
+    diagRef.current.lastAnalyzeHttpStatus = res.status
 
-    // 8. Stale check
+    // 9. Stale check
     if (seq !== captureSeqRef.current) return
     if (mySession !== sessionSeqRef.current) return
 
@@ -339,7 +511,7 @@ export function useCaptureSession(
       })
     }
 
-    // 9. Build candidate
+    // 10. Build candidate
     const candidate: EpisodeCandidate = {
       timestamp: now,
       ocrText,
@@ -352,18 +524,23 @@ export function useCaptureSession(
     }
     prevMeaningfulOcrRef.current = ocrText
 
-    // 10. Feed engine
+    // 11. Feed engine, track episode opens
+    const episodeIdBefore = engineRef.current.getCurrentEpisode()?.id ?? null
     const finalized = engineRef.current.handleAnalysis(result, candidate)
+    const episodeIdAfter = engineRef.current.getCurrentEpisode()?.id ?? null
+    if (episodeIdAfter !== null && episodeIdAfter !== episodeIdBefore) {
+      diagRef.current.episodesOpened++
+    }
     if (finalized) await saveEpisodeToQueue(finalized)
 
     lastAnalysisAtRef.current = Date.now()
 
-    // 11. Persist active episode snapshot for crash recovery
+    // 12. Persist active episode snapshot for crash recovery
     const snap = engineRef.current.getRecoverySnapshot(sessionIdRef.current)
     if (snap) await setActiveEpisodeSnapshot(snap)
     else await clearActiveEpisodeSnapshot()
 
-    // 12. Update session meta
+    // 13. Update session meta
     try {
       await setSessionMeta({
         sessionId: sessionIdRef.current,
@@ -409,7 +586,7 @@ export function useCaptureSession(
   async function doStop() {
     safeSetState('stopping')
 
-    // Stop scheduler immediately
+    // Stop all timers immediately
     if (schedulerRef.current) {
       clearInterval(schedulerRef.current)
       schedulerRef.current = null
@@ -417,6 +594,10 @@ export function useCaptureSession(
     if (elapsedTimerRef.current) {
       clearInterval(elapsedTimerRef.current)
       elapsedTimerRef.current = null
+    }
+    if (diagTimerRef.current) {
+      clearInterval(diagTimerRef.current)
+      diagTimerRef.current = null
     }
 
     // Wait for in-flight frame (max 8s)
@@ -470,6 +651,8 @@ export function useCaptureSession(
       workerRef.current = null
     }
 
+    diagRef.current.streamStatus = 'ended'
+    diagRef.current.ocrWorkerStatus = 'none'
     prevImageDataRef.current = null
     prevOcrTextRef.current = ''
 
@@ -497,6 +680,32 @@ export function useCaptureSession(
   }, [])
 
   // ---------------------------------------------------------------------------
+  // retryOcr — terminate worker, re-init, re-run smoke test, resume scheduler
+  // ---------------------------------------------------------------------------
+
+  const retryOcr = useCallback(async (): Promise<void> => {
+    if (workerRef.current) {
+      await workerRef.current.terminate().catch(() => {})
+      workerRef.current = null
+    }
+    diagRef.current.ocrWorkerStatus = 'none'
+    safeSetState('loading_ocr')
+    try {
+      await ensureWorker()
+      await runOcrSmokeTest(workerRef.current!)
+    } catch (err) {
+      diagRef.current.lastPipelineError = { stage: 'ocr_retry', error: String(err) }
+      diagRef.current.ocrWorkerStatus = 'error'
+      safeSetState('ocr_error')
+      return
+    }
+    consecutiveOcrFailuresRef.current = 0
+    resumeScheduler()
+    safeSetState('recording')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // ---------------------------------------------------------------------------
   // startCapture
   // ---------------------------------------------------------------------------
 
@@ -505,10 +714,17 @@ export function useCaptureSession(
       safeSetState('capture_unavailable')
       return
     }
-    if (stateRef.current === 'recording' || stateRef.current === 'stopping') return
+    if (
+      stateRef.current === 'recording' ||
+      stateRef.current === 'stopping' ||
+      stateRef.current === 'screen_connected' ||
+      stateRef.current === 'loading_ocr'
+    ) return
 
     safeSetState('requesting')
     setSurfaceWarning(null)
+    // Reset diagnostics for new session
+    diagRef.current = initialDiagnostics()
 
     let stream: MediaStream
     try {
@@ -527,6 +743,8 @@ export function useCaptureSession(
       return
     }
 
+    diagRef.current.streamStatus = 'active'
+
     // Surface warning if not full screen
     const settings = track.getSettings()
     if ((settings as Record<string, unknown>).displaySurface !== 'monitor') {
@@ -543,6 +761,9 @@ export function useCaptureSession(
     video.srcObject = stream
     await video.play()
     videoRef.current = video
+
+    // Stream is live — set screen_connected immediately
+    safeSetState('screen_connected')
 
     // Offscreen canvas
     const canvas = document.createElement('canvas')
@@ -561,6 +782,7 @@ export function useCaptureSession(
     prevMeaningfulOcrRef.current = ''
     lastAnalysisAtRef.current = 0
     pendingAnalysisCountRef.current = 0
+    consecutiveOcrFailuresRef.current = 0
     streamRef.current = stream
 
     // track.onended — null it before stopping to avoid re-triggering shutdown
@@ -580,13 +802,22 @@ export function useCaptureSession(
       /* non-fatal */
     }
 
-    // Load OCR worker
+    // Start diagnostics re-render timer (1 s, separate from capture scheduler)
+    if (diagTimerRef.current) clearInterval(diagTimerRef.current)
+    diagTimerRef.current = setInterval(() => {
+      if (isMountedRef.current) setDiagVersion((v) => v + 1)
+    }, 1000)
+
+    // Load OCR worker and validate with smoke test
     safeSetState('loading_ocr')
     try {
       await ensureWorker()
-    } catch {
-      safeSetState('error')
-      stream.getTracks().forEach((t) => t.stop())
+      await runOcrSmokeTest(workerRef.current!)
+    } catch (err) {
+      diagRef.current.lastPipelineError = { stage: 'ocr_smoke_test', error: String(err) }
+      diagRef.current.ocrWorkerStatus = 'error'
+      safeSetState('ocr_error')
+      // Stream stays alive so retryOcr() can restart the worker without re-sharing
       return
     }
 
@@ -632,10 +863,19 @@ export function useCaptureSession(
       isMountedRef.current = false
       window.removeEventListener('pagehide', handlePageHide)
       window.removeEventListener('online', handleOnline)
+      if (diagTimerRef.current) {
+        clearInterval(diagTimerRef.current)
+        diagTimerRef.current = null
+      }
       // Best-effort stop on unmount
       if (
         shutdownPromiseRef.current === null &&
-        (stateRef.current === 'recording' || stateRef.current === 'loading_ocr')
+        (
+          stateRef.current === 'recording' ||
+          stateRef.current === 'loading_ocr' ||
+          stateRef.current === 'screen_connected' ||
+          stateRef.current === 'ocr_error'
+        )
       ) {
         stopCapture().catch(() => {})
       }
@@ -654,8 +894,10 @@ export function useCaptureSession(
     permanentlyFailedCount,
     surfaceWarning,
     analysisBacklogged,
+    diagnostics: diagRef.current,
     startCapture,
     stopCapture,
+    retryOcr,
     isSupported,
   }
 }

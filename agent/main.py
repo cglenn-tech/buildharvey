@@ -5,7 +5,7 @@ Run:  python main.py
       (or launched automatically by app.py after credential and permissions are set up)
 
 Loop:
-  1. Check if a work session is active (browser connected + user clicked Start).
+  1. Check if a work session is active (user clicked Start Work Session).
   2. Capture screen → extract context → build Observation.
   3. If screenshot available and API key configured: analyze with Claude Vision.
      Engine decides: continue current episode, open new, or transition.
@@ -13,10 +13,11 @@ Loop:
   5. On episode close: finalize → persist to SQLite → enqueue server sync.
 
 Session gate:
-  - Agent only records while the browser has an active work session.
-  - The browser must send {"type": "start"} to begin recording.
-  - When the user clicks Stop (or the last tab disconnects), recording ends immediately.
-  - Active episode is finalized on stop.
+  - Recording begins when the user clicks Start Work Session in the desktop app.
+  - Browser controls (via Realtime) are secondary and optional.
+  - The desktop app can Start/Stop recording without a browser being open.
+  - A browser refresh or closure does NOT stop recording.
+  - Active episode is finalized on Stop.
 
 Startup:
   - Mark locally invalid episodes (not deleted — just flagged).

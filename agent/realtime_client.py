@@ -5,8 +5,14 @@ Replaces the local WebSocket session_server. Both the browser and the agent
 connect outward to Supabase Realtime on the channel:
   buildharvey:device:<device_id>
 
-Browser → Realtime broadcast "start" → agent begins recording.
-Browser → Realtime broadcast "stop"  → agent stops recording.
+Local (desktop) controls — primary:
+  start_local()  → agent begins recording without requiring the browser
+  stop_local()   → agent stops recording regardless of browser state
+
+Browser controls — secondary (optional):
+  Browser → Realtime broadcast "start" → agent begins recording.
+  Browser → Realtime broadcast "stop"  → agent stops recording.
+
 Agent   → Realtime broadcast "status" (state) → browser updates UI.
 Agent   → Realtime presence {type:"agent"} → browser knows agent is alive.
 
@@ -19,7 +25,9 @@ Threading model:
 Grace period:
   When the last browser leaves presence, a 10-minute timer starts.
   If a browser returns, the timer cancels and the session resumes.
-  If 10 minutes pass, recording stops and the agent idles.
+  If 10 minutes pass AND recording was started from the browser (not locally),
+  recording stops and the agent idles.
+  Local recording is unaffected by browser presence.
 """
 import asyncio
 import json
@@ -37,6 +45,7 @@ import config
 
 _lock = threading.Lock()
 _recording_event = threading.Event()
+_local_recording: bool = False    # set by desktop UI Start/Stop buttons
 _browser_present: bool = False
 _current_state: str = 'idle'
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -87,8 +96,13 @@ def _cancel_grace_timer() -> None:
 
 
 def _grace_period_expired() -> None:
-    """Called after 10 minutes with no browser. Stop recording and go idle."""
+    """Called after 10 minutes with no browser.
+    Only stops recording if the session was browser-initiated, not locally."""
     global _browser_present
+    with _lock:
+        if _local_recording:
+            print("[realtime] grace period expired — local recording active, continuing")
+            return
     print("[realtime] 10-minute grace period expired — stopping recording")
     with _lock:
         _browser_present = False
@@ -96,11 +110,46 @@ def _grace_period_expired() -> None:
     set_status('idle')
 
 
+# ── Local recording controls (primary) ────────────────────────────────────────
+
+def start_local() -> None:
+    """
+    Start recording from the desktop UI.
+    Does not require a browser to be present or connected.
+    """
+    global _local_recording
+    with _lock:
+        _local_recording = True
+    _recording_event.set()
+    print("[realtime] local recording started")
+    set_status('recording')
+
+
+def stop_local() -> None:
+    """
+    Stop recording from the desktop UI.
+    main.py will finalize the active episode and broadcast 'idle' when done.
+    """
+    global _local_recording
+    with _lock:
+        _local_recording = False
+    _recording_event.clear()
+    print("[realtime] local recording stopped")
+
+
 # ── Public API (called from main thread) ──────────────────────────────────────
 
 def is_recording_active() -> bool:
-    """True when a browser is present AND the user has started a work session."""
+    """
+    True when a work session is active.
+
+    Recording is active if:
+    - The desktop UI started recording locally (no browser required), OR
+    - A browser sent 'start' AND the browser is still present.
+    """
     with _lock:
+        if _local_recording:
+            return _recording_event.is_set()
         return _recording_event.is_set() and _browser_present
 
 
@@ -121,11 +170,12 @@ def force_stop() -> None:
     Immediately stop recording. Called on OS sleep, logout, or user switch.
     Does not attempt to broadcast (Realtime connection likely dropped anyway).
     """
-    global _browser_present
+    global _browser_present, _local_recording
     _cancel_grace_timer()
     _recording_event.clear()
     with _lock:
         _browser_present = False
+        _local_recording = False
     _current_state = 'idle'
 
 
@@ -219,12 +269,17 @@ async def _connect_once() -> None:
     # ── Broadcast handlers ────────────────────────────────────────────────────
 
     async def on_start(payload, ref=None, join_ref=None):
-        print("[realtime] ← start")
+        print("[realtime] ← start (browser)")
         _recording_event.set()
         # main.py broadcasts 'recording' once capture actually starts
 
     async def on_stop(payload, ref=None, join_ref=None):
-        print("[realtime] ← stop")
+        print("[realtime] ← stop (browser)")
+        # Don't clear if locally started — local controls take priority
+        with _lock:
+            if _local_recording:
+                print("[realtime] ignoring browser stop — local recording active")
+                return
         _recording_event.clear()
         # main.py broadcasts 'idle' once episode is finalized
 
@@ -258,12 +313,13 @@ async def _connect_once() -> None:
 
         elif not has_browser and was_browser:
             if _recording_event.is_set():
+                with _lock:
+                    if _local_recording:
+                        print("[realtime] last browser left — local recording continues unaffected")
+                        return
                 print("[realtime] last browser left — 10-min grace period started")
                 _grace_timer = threading.Timer(600, _grace_period_expired)
                 _grace_timer.start()
-            else:
-                with _lock:
-                    pass  # already idle, nothing to do
 
     channel.on_presence_sync(on_presence_sync)
 

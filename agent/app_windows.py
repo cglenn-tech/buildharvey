@@ -207,7 +207,7 @@ def run_self_test() -> int:
 
     # 1. Core imports
     try:
-        import mss, PIL, numpy, keyring, psutil, pytesseract, anthropic  # noqa: F401
+        import mss, PIL, numpy, keyring, psutil, pytesseract  # noqa: F401
         _log('[self-test] core imports: PASS')
     except ImportError as exc:
         failures.append(f'core imports: {exc}')

@@ -91,24 +91,25 @@ $tessExe = "$TESSERACT_DIR\tesseract.exe"
 
 if (!(Test-Path $tessExe)) {
     Write-Host "Tesseract not found at $TESSERACT_DIR"
-    $choice = Read-Host "Install Tesseract $TESSERACT_VERSION automatically? [y/N]"
+    $choice = Read-Host "Install Tesseract $TESSERACT_VERSION via Chocolatey? [y/N]"
     if ($choice -imatch '^y') {
-        Write-Host "Downloading Tesseract $TESSERACT_VERSION from UB-Mannheim..."
-        $url = "https://github.com/UB-Mannheim/tesseract/releases/download/v$TESSERACT_VERSION/tesseract-ocr-w64-setup-$TESSERACT_VERSION.exe"
-        Invoke-WebRequest -Uri $url -OutFile "$Root\_tesseract-setup.exe" -UseBasicParsing
-        Write-Host "Running installer silently..."
-        $proc = Start-Process -FilePath "$Root\_tesseract-setup.exe" `
-            -ArgumentList "/S" -Wait -PassThru -NoNewWindow
-        Remove-Item "$Root\_tesseract-setup.exe" -Force -ErrorAction SilentlyContinue
-        if ($proc.ExitCode -ne 0) {
-            Write-Error "Tesseract installer failed (exit code $($proc.ExitCode))"
+        Write-Host "Installing Tesseract $TESSERACT_VERSION via Chocolatey..."
+        choco install tesseract --version=$TESSERACT_VERSION -y --no-progress
+        if ($LASTEXITCODE -ne 0) { Write-Error "Chocolatey failed to install Tesseract" }
+
+        # Resolve actual install path robustly
+        $resolved = $null
+        try { $resolved = (Get-Command tesseract -ErrorAction SilentlyContinue)?.Source } catch {}
+        if (!$resolved) {
+            try { $resolved = (where.exe tesseract 2>$null | Select-Object -First 1) } catch {}
         }
-        Write-Host "Tesseract installed."
+        if ($resolved) { $TESSERACT_DIR = Split-Path $resolved -Parent }
+        $tessExe = "$TESSERACT_DIR\tesseract.exe"
+        Write-Host "Tesseract installed at: $TESSERACT_DIR"
     } else {
         Write-Error @"
-Tesseract not found. Install options:
-  Automatic:  choco install tesseract -y
-  Manual:     https://github.com/UB-Mannheim/tesseract/releases/tag/v$TESSERACT_VERSION
+Tesseract not found. Install with:
+  choco install tesseract -y
 Expected path: $TESSERACT_DIR
 "@
     }

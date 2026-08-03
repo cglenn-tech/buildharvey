@@ -1,40 +1,28 @@
 """
-Live screenshot analysis via Claude Vision.
+Live screenshot analysis via BuildHarvey server.
 
-Analyzes a single screenshot against current episode context and returns
-validated ScreenshotEvidence or None.
+Sends a JPEG-compressed screenshot to /api/agent/vision and returns a
+ScreenshotEvidence object, or None on any failure.
 
-Claude — not OCR or NER — names episodes, decides boundaries, and determines
-whether a screenshot is meaningful. Raw metadata is supporting context only.
+The server holds the Anthropic API key and model selection.
+The agent never needs an ANTHROPIC_API_KEY.
 
-Returns None on:
-  - API failure (buffers screenshot for retry)
-  - Validation failure (partial/malformed response)
-  - Non-meaningful screenshot (loading screen, idle, etc.)
-  - Personal/irrelevant content (entertainment, non-work)
+On any server failure the caller receives None — the episode engine continues
+tracking metadata, and all local data is preserved and queued for sync.
 """
-import json
 import base64
+import io
+import json
+import time
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
+import auth
 import config
 from episode import ScreenshotEvidence
-
-
-_REQUIRED_FIELDS = {
-    "meaningful",
-    "personal_or_irrelevant",
-    "activity_description",
-    "objective",
-    "entities",
-    "actions",
-    "continue_current_episode",
-    "start_new_episode",
-    "suggested_episode_name",
-    "supporting_evidence",
-}
 
 
 def analyze(obs, context: dict) -> Optional[ScreenshotEvidence]:
@@ -45,217 +33,142 @@ def analyze(obs, context: dict) -> Optional[ScreenshotEvidence]:
     context: dict from EpisodeEngine.get_context()
 
     Returns ScreenshotEvidence if valid and meaningful, None otherwise.
+    All local observations are preserved regardless of outcome.
     """
-    if not config.ANTHROPIC_API_KEY:
-        return None
-
     screenshot_path = getattr(obs, "screenshot_path", None)
     if not screenshot_path:
         return None
 
     try:
-        import anthropic
-    except ImportError:
-        return None
-
-    try:
-        data = Path(screenshot_path).read_bytes()
+        jpeg_bytes = _prepare_screenshot(screenshot_path)
     except Exception as e:
-        print(f"[vision] failed — could not read screenshot: {e} (buffering screenshot)")
+        print(f"[vision] failed — could not prepare screenshot: {e}")
         return None
 
-    b64 = base64.standard_b64encode(data).decode("utf-8")
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    b64 = base64.standard_b64encode(jpeg_bytes).decode("utf-8")
 
-    import time
-    timestamp = time.strftime("%H:%M")
-
-    try:
-        response = client.messages.create(
-            model=config.VISION_MODEL,
-            max_tokens=512,
-            messages=[{"role": "user", "content": _build_content(b64, context, obs)}],
+    if len(b64) > config.VISION_MAX_ENCODED_BYTES:
+        print(
+            f"[vision] failed — screenshot too large after compression "
+            f"({len(b64):,} bytes > {config.VISION_MAX_ENCODED_BYTES:,} limit)"
         )
-    except Exception as e:
-        print(f"[vision] failed — {e} (buffering screenshot)")
         return None
 
-    raw_text = response.content[0].text if response.content else ""
-
-    parsed = _parse_response(raw_text)
-    if parsed is None:
-        return None
-
-    error = _validate(parsed)
-    if error:
-        print(f"[vision] rejected — validation: {error}")
-        return None
-
-    if not parsed["meaningful"]:
-        print("[vision] rejected — not meaningful")
-        return None
-
-    if parsed["personal_or_irrelevant"]:
-        print("[vision] discarded — personal/irrelevant")
+    token = auth.read_credential()
+    if not token:
         return None
 
     app_context = _app_context(obs)
+    payload = json.dumps({
+        "screenshot_b64": b64,
+        "context": context,
+        "app_context": app_context,
+    }).encode()
+
+    req = urllib.request.Request(
+        f"{config.BASE_URL}/api/agent/vision",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        # Try to parse structured error from response body
+        try:
+            body = json.loads(e.read())
+            error_code = body.get("error", "unknown")
+        except Exception:
+            error_code = f"http_{e.code}"
+        _log_server_error(error_code)
+        return None
+    except Exception as e:
+        print(f"[vision] failed — {type(e).__name__}: {e}")
+        return None
+
+    if not result.get("success"):
+        _log_server_error(result.get("error", "unknown"))
+        return None
+
+    ev = result.get("evidence", {})
+
+    if not ev.get("meaningful"):
+        print("[vision] rejected — not meaningful")
+        return None
+
+    if ev.get("personal_or_irrelevant"):
+        print("[vision] discarded — personal/irrelevant")
+        return None
+
+    timestamp = time.strftime("%H:%M")
+    model = ev.get("model", "")
+    input_tokens = ev.get("input_tokens", 0)
+    output_tokens = ev.get("output_tokens", 0)
+
     evidence = ScreenshotEvidence(
         screenshot_path=screenshot_path,
         timestamp=timestamp,
-        activity_description=parsed["activity_description"],
-        objective=parsed["objective"],
-        actions=parsed["actions"],
-        entities=parsed["entities"],
-        supporting_evidence=parsed["supporting_evidence"],
+        activity_description=ev.get("activity_description", ""),
+        objective=ev.get("objective", ""),
+        actions=ev.get("actions", []),
+        entities=ev.get("entities", []),
+        supporting_evidence=ev.get("supporting_evidence", []),
         app_context=app_context,
-        model=config.VISION_MODEL,
-        input_tokens=response.usage.input_tokens,
-        output_tokens=response.usage.output_tokens,
-        continue_current_episode=parsed["continue_current_episode"],
-        start_new_episode=parsed["start_new_episode"],
-        suggested_episode_name=parsed["suggested_episode_name"],
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        continue_current_episode=ev.get("continue_current_episode", True),
+        start_new_episode=ev.get("start_new_episode", False),
+        suggested_episode_name=ev.get("suggested_episode_name", ""),
     )
 
     print(
-        f"[vision] accepted — {parsed['suggested_episode_name']} | "
-        f"meaningful=true | {response.usage.input_tokens}t/{response.usage.output_tokens}t"
+        f"[vision] accepted — {ev.get('suggested_episode_name', '')} | "
+        f"meaningful=true | {input_tokens}t/{output_tokens}t"
     )
     return evidence
 
 
-def _build_content(b64: str, context: dict, obs) -> list:
-    app_info = _app_context(obs)
-    current_ep = context.get("current_episode_name", "")
-    current_obj = context.get("current_objective", "")
-    duration = context.get("episode_duration_minutes", 0)
-    recent_actions = context.get("recent_actions", [])
-    known_entities = context.get("known_entities", [])
+def _prepare_screenshot(path: str) -> bytes:
+    """
+    Read, resize, and JPEG-compress a screenshot for server-side analysis.
 
-    context_block = ""
-    if current_ep:
-        context_block = (
-            f"\nCurrent episode: {current_ep}\n"
-            f"Current objective: {current_obj}\n"
-            f"Duration so far: {duration:.0f} minutes\n"
-        )
-        if recent_actions:
-            flat = []
-            for sublist in recent_actions:
-                if isinstance(sublist, list):
-                    flat.extend(sublist)
-                elif sublist:
-                    flat.append(sublist)
-            if flat:
-                context_block += f"Recent actions: {'; '.join(flat[-6:])}\n"
-        if known_entities:
-            context_block += f"Known entities: {', '.join(known_entities[:10])}\n"
+    Always outputs RGB JPEG at VISION_JPEG_QUALITY, capped at VISION_ANALYSIS_SIZE.
+    Full-resolution raw images are never sent to the server.
+    """
+    from PIL import Image
 
-    prompt = (
-        f"You are analyzing a screenshot to determine what work is being done.\n"
-        f"App context: {app_info}{context_block}\n\n"
-        f"Analyze the screenshot carefully and respond with ONLY valid JSON matching this exact schema:\n\n"
-        f'{{\n'
-        f'  "meaningful": true,\n'
-        f'  "personal_or_irrelevant": false,\n'
-        f'  "activity_description": "Specific description of what is visible and what work is being done",\n'
-        f'  "objective": "What the user is trying to accomplish overall",\n'
-        f'  "entities": [{{"name": "EntityName", "type": "project|client|case|person|company|tool", "evidence_strength": "strong|moderate|weak"}}],\n'
-        f'  "actions": ["Specific action 1", "Specific action 2"],\n'
-        f'  "continue_current_episode": true,\n'
-        f'  "start_new_episode": false,\n'
-        f'  "suggested_episode_name": "Descriptive Name — Specific Task",\n'
-        f'  "supporting_evidence": ["Visual evidence item 1", "Visual evidence item 2"]\n'
-        f'}}\n\n'
-        f"Rules for meaningful:\n"
-        f"- Set meaningful=false for: loading screens, blank screens, idle desktops, screensavers, "
-        f"login prompts, menus with no work context, reset states\n"
-        f"- Set meaningful=true for any actual work activity\n\n"
-        f"Rules for personal_or_irrelevant:\n"
-        f"- Set personal_or_irrelevant=true ONLY for clearly non-work activity (entertainment, "
-        f"personal social media browsing unrelated to work)\n"
-        f"- Do NOT set personal_or_irrelevant=true for: email, scheduling, admin tasks, "
-        f"research, meetings, overhead work\n\n"
-        f"Rules for episode boundaries:\n"
-        f"- continue_current_episode=true when work relates to the same objective — switching "
-        f"apps does NOT split episodes (GitHub → terminal → Vercel → Supabase for the same "
-        f"project is ONE episode)\n"
-        f"- start_new_episode=true ONLY when the objective has clearly shifted to unrelated work\n"
-        f"- continue_current_episode and start_new_episode must NOT both be true\n\n"
-        f"Rules for suggested_episode_name:\n"
-        f'- Must be specific and descriptive: "BuildHarvey — Deployment Debugging" NOT just "BuildHarvey"\n'
-        f"- Must NOT be empty or a placeholder if meaningful=true\n"
-        f"- Must NOT be empty if start_new_episode=true\n\n"
-        f"Respond with ONLY the JSON object. No explanation, no markdown."
-    )
+    img = Image.open(path)
 
-    return [
-        {"type": "text", "text": prompt},
-        {
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": "image/jpeg",
-                "data": b64,
-            },
-        },
-    ]
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+
+    max_w, max_h = config.VISION_ANALYSIS_SIZE
+    if img.width > max_w or img.height > max_h:
+        img.thumbnail((max_w, max_h), Image.LANCZOS)
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=config.VISION_JPEG_QUALITY, optimize=True)
+    return buf.getvalue()
 
 
-def _parse_response(text: str) -> Optional[dict]:
-    text = text.strip()
-    if text.startswith("```"):
-        parts = text.split("```")
-        if len(parts) >= 2:
-            text = parts[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as e:
-        print(f"[vision] rejected — invalid JSON: {e}")
-        return None
-
-
-def _validate(data: dict) -> Optional[str]:
-    """Return error string if invalid, None if valid."""
-    for f in _REQUIRED_FIELDS:
-        if f not in data:
-            return f"missing field '{f}'"
-
-    if not isinstance(data["meaningful"], bool):
-        return "meaningful must be bool"
-    if not isinstance(data["personal_or_irrelevant"], bool):
-        return "personal_or_irrelevant must be bool"
-    if not isinstance(data["continue_current_episode"], bool):
-        return "continue_current_episode must be bool"
-    if not isinstance(data["start_new_episode"], bool):
-        return "start_new_episode must be bool"
-    if not isinstance(data["entities"], list):
-        return "entities must be list"
-    if not isinstance(data["actions"], list):
-        return "actions must be list"
-    if not isinstance(data["supporting_evidence"], list):
-        return "supporting_evidence must be list"
-
-    if data["continue_current_episode"] and data["start_new_episode"]:
-        return "continue_current_episode and start_new_episode are both true"
-
-    if not data["meaningful"] and data["actions"]:
-        return "meaningful=false but actions is non-empty"
-
-    if data["meaningful"]:
-        if not str(data.get("objective", "")).strip():
-            return "meaningful=true but objective is empty"
-        if not str(data.get("suggested_episode_name", "")).strip():
-            return "meaningful=true but suggested_episode_name is empty"
-
-    if data["start_new_episode"]:
-        if not str(data.get("suggested_episode_name", "")).strip():
-            return "start_new_episode=true but suggested_episode_name is empty"
-
-    return None
+def _log_server_error(error_code: str) -> None:
+    """Print a human-readable status for known structured error codes."""
+    messages = {
+        "unauthorized":          "[vision] account connection expired — work saved locally",
+        "invalid_request":       "[vision] invalid request sent to server",
+        "payload_too_large":     "[vision] screenshot was too large for server",
+        "server_misconfigured":  "[vision] server configuration error — work saved locally",
+        "provider_timeout":      "[vision] analysis temporarily unavailable (timeout) — work saved locally",
+        "provider_error":        "[vision] analysis temporarily unavailable — work saved locally",
+        "invalid_model_response": "[vision] unexpected model response — work saved locally",
+    }
+    print(messages.get(error_code, f"[vision] server error: {error_code} — work saved locally"))
 
 
 def _app_context(obs) -> str:

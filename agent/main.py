@@ -7,9 +7,9 @@ Run:  python main.py
 Loop:
   1. Check if a work session is active (user clicked Start Work Session).
   2. Capture screen → extract context → build Observation.
-  3. If screenshot available and API key configured: analyze with Claude Vision.
+  3. If screenshot available: POST to /api/agent/vision for Claude analysis.
      Engine decides: continue current episode, open new, or transition.
-  4. If no screenshot or no API key: update metadata context only.
+  4. If no screenshot or server returns None: update metadata context only.
   5. On episode close: finalize → persist to SQLite → enqueue server sync.
 
 Session gate:
@@ -23,8 +23,8 @@ Startup:
   - Mark locally invalid episodes (not deleted — just flagged).
   - Enqueue server cleanup for those IDs.
 
-Degraded mode (no API key):
-  - Vision analysis skipped; no Episodes opened.
+Degraded mode (no device token):
+  - Vision analysis returns None; no Episodes opened.
   - Metadata tracked in memory only.
   - System keeps running; no garbage Episodes created.
 """
@@ -53,8 +53,6 @@ def main(
 ) -> None:
     print("[agent] BuildHarvey starting")
     print(f"[agent] db {config.DB_PATH}")
-    if not config.ANTHROPIC_API_KEY:
-        print("[agent] WARNING: ANTHROPIC_API_KEY not set — running in degraded mode (no episodes)")
 
     realtime_client.start()
 
@@ -132,8 +130,8 @@ def _cycle(conn, engine: EpisodeEngine) -> None:
             _close_and_save(conn, closed)
         return
 
-    if obs.screenshot_path and config.ANTHROPIC_API_KEY:
-        # Vision path: Claude analyzes screenshot and drives all Episode decisions
+    if obs.screenshot_path:
+        # Vision path: server analyzes screenshot and drives all Episode decisions
         ctx = engine.get_context()
         evidence = vision.analyze(obs, ctx)
         result = engine.ingest_vision(evidence, obs)

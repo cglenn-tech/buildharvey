@@ -30,16 +30,14 @@ CASE_SWITCH_THRESHOLD = 3               # consecutive observations of the same n
 MIN_EPISODE_DURATION_MINUTES = 0.5      # episodes shorter than this are discarded
 MAX_KEY_OBSERVATIONS = 8               # max observations stored per episode
 
-# ── Anthropic ─────────────────────────────────────────────────────────────────
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-OBSERVATION_MODEL = "claude-haiku-4-5"   # fast model for per-episode finalization
-VISION_MODEL = os.environ.get("VISION_MODEL", OBSERVATION_MODEL)
-# Per-screenshot live analysis model. Default: same as OBSERVATION_MODEL.
-# Vision analysis is ~512 output tokens. Use haiku for cost efficiency.
-
-# Max screenshots passed to Claude Vision per episode.
-# Screenshots are subsampled evenly if more were captured.
+# Max screenshots preserved per episode (evenly subsampled for evidence storage).
 MAX_VISION_SCREENSHOTS = 8
+
+# ── Screenshot compression for server-side vision analysis ────────────────────
+# Screenshots are resized and JPEG-compressed before being POSTed to the server.
+VISION_JPEG_QUALITY = 85
+VISION_ANALYSIS_SIZE = (1440, 900)          # max pixel dimensions sent to server
+VISION_MAX_ENCODED_BYTES = 3 * 1024 * 1024  # 3 MB base64 limit per screenshot
 
 # Max pixel dimensions for screenshots sent to the vision API.
 # Reduces token cost while preserving enough resolution to read content.

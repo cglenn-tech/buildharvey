@@ -33,8 +33,6 @@ a = Analysis(
         'keyring', 'keyring.backends.Windows',
         # Screen capture, imaging, OCR
         'psutil', 'mss', 'pytesseract', 'PIL',
-        # HTTP / Anthropic
-        'anthropic',
         # Windows accessibility (browser URL extraction)
         'pywinauto',
         # Realtime WebSocket client (optional — browser controls)

@@ -47,7 +47,6 @@ function fmtDateWithYear(dateIso: string): string {
 // ── Period label ───────────────────────────────────────────────────────────────
 
 function buildPeriodLabel(periodStart: string, periodEnd: string): string {
-  // "Monday, August 3 – Friday, August 7, 2026"
   const startStr = fmtDateLong(periodStart);
   const endStr = fmtDateWithYear(periodEnd);
   return `${startStr} \u2013 ${endStr}`;
@@ -98,7 +97,10 @@ function buildGroups(
     const eps = g.episode_ids
       .map((id) => episodeById.get(id))
       .filter((e): e is Episode => e !== undefined);
-    const totalMinutes = eps.reduce((sum, e) => sum + (e.duration_minutes ?? 0), 0);
+    const totalMinutes = eps.reduce(
+      (sum, e) => sum + (e.duration_minutes ?? 0),
+      0
+    );
     return { ...g, episodes: eps, totalMinutes };
   });
 }
@@ -113,8 +115,36 @@ function renderReport(
   periodLabel: string,
   caseMinutes: number,
   adminMinutes: number,
-  totalMinutes: number
+  totalMinutes: number,
+  roundTo15: boolean
 ): string {
+  // If roundTo15, round each episode's duration for display only
+  function displayMin(raw: number): number {
+    if (!roundTo15) return raw;
+    return Math.round(raw / 15) * 15;
+  }
+
+  function groupDisplayTotal(g: GroupResult): number {
+    if (!roundTo15) return g.totalMinutes;
+    return g.episodes.reduce(
+      (s, ep) => s + displayMin(ep.duration_minutes ?? 0),
+      0
+    );
+  }
+
+  const displayCaseMinutes = groups
+    .filter((g) => !g.is_administrative)
+    .reduce((s, g) => s + groupDisplayTotal(g), 0);
+  const displayAdminMinutes = groups
+    .filter((g) => g.is_administrative)
+    .reduce((s, g) => s + groupDisplayTotal(g), 0);
+  const displayTotalMinutes = displayCaseMinutes + displayAdminMinutes;
+
+  // Suppress unused vars when roundTo15 is false
+  void caseMinutes;
+  void adminMinutes;
+  void totalMinutes;
+
   const lines: string[] = [];
 
   // Header
@@ -127,35 +157,39 @@ function renderReport(
 
   const caseGroups = groups.filter((g) => !g.is_administrative);
   for (const g of caseGroups) {
-    lines.push(`${g.title.padEnd(COL_WIDTH)}${fmtDur(g.totalMinutes)}`);
+    lines.push(
+      `${g.title.padEnd(COL_WIDTH)}${fmtDur(groupDisplayTotal(g))}`
+    );
   }
 
   lines.push(DIVIDER);
   lines.push(
-    `${"Total case/project time".padEnd(COL_WIDTH)}${fmtDur(caseMinutes)}`
+    `${"Total case/project time".padEnd(COL_WIDTH)}${fmtDur(displayCaseMinutes)}`
   );
 
   const adminGroups = groups.filter((g) => g.is_administrative);
   if (adminGroups.length > 0) {
     lines.push("");
     lines.push(
-      `${"Administrative work".padEnd(COL_WIDTH)}${fmtDur(adminMinutes)}`
+      `${"Administrative work".padEnd(COL_WIDTH)}${fmtDur(displayAdminMinutes)}`
     );
     lines.push(DIVIDER);
     lines.push(
-      `${"Total administrative time".padEnd(COL_WIDTH)}${fmtDur(adminMinutes)}`
+      `${"Total administrative time".padEnd(COL_WIDTH)}${fmtDur(displayAdminMinutes)}`
     );
   }
 
   lines.push(DIVIDER);
-  lines.push(`${"Total recorded time".padEnd(COL_WIDTH)}${fmtDur(totalMinutes)}`);
+  lines.push(
+    `${"Total recorded time".padEnd(COL_WIDTH)}${fmtDur(displayTotalMinutes)}`
+  );
 
   // Detail sections
   for (const g of groups) {
     if (g.episodes.length === 0) continue;
     lines.push("");
     lines.push("");
-    lines.push(`${g.title.toUpperCase()} \u2014 ${fmtDur(g.totalMinutes)}`);
+    lines.push(`${g.title.toUpperCase()} \u2014 ${fmtDur(groupDisplayTotal(g))}`);
 
     // Group episodes by day (UTC date)
     const dayMap = new Map<string, Episode[]>();
@@ -174,7 +208,7 @@ function renderReport(
       for (const ep of dayEps) {
         const start = fmtTime(ep.started_at);
         const end = fmtTime(ep.ended_at);
-        const dur = fmtDur(ep.duration_minutes ?? 0);
+        const dur = fmtDur(displayMin(ep.duration_minutes ?? 0));
         lines.push(`  ${start}\u2013${end} (${dur})`);
         const obs = (ep.key_observations as KeyObservation[])
           .map((o) => o.text)
@@ -185,6 +219,11 @@ function renderReport(
         }
       }
     }
+  }
+
+  if (roundTo15) {
+    lines.push("");
+    lines.push("(Durations rounded to nearest 15 min)");
   }
 
   return lines.join("\n");
@@ -199,6 +238,7 @@ function episodeSummary(ep: Episode): string {
   return [
     `id: ${ep.id}`,
     `case_name: ${ep.case_name}`,
+    `work_type: ${ep.work_type ?? "project"}`,
     `duration_minutes: ${ep.duration_minutes}`,
     `started_at: ${ep.started_at}`,
     `observations:\n${obs || "  (none)"}`,
@@ -210,7 +250,9 @@ function episodeSummary(ep: Episode): string {
 
 export async function GET(request: NextRequest) {
   const supabase = await getServerClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
   if (!user) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
   const params = new URL(request.url).searchParams;
@@ -243,31 +285,40 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: Request) {
   const supabase = await getServerClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
 
   if (!user) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { weekStart, weekEnd } = await request.json();
+  const body = await request.json();
 
-  if (!weekStart || !weekEnd) {
+  // Accept new periodStart/periodEnd format; fall back to legacy weekStart/weekEnd
+  const periodStart = (
+    body.periodStart ??
+    body.weekStart ??
+    ""
+  ).slice(0, 10);
+  const periodEnd = (body.periodEnd ?? body.weekEnd ?? "").slice(0, 10);
+  const roundTo15: boolean = body.roundTo15 === true;
+  const periodLabel: string =
+    body.periodLabel ?? buildPeriodLabel(periodStart, periodEnd);
+
+  if (!periodStart || !periodEnd) {
     return Response.json(
-      { error: "weekStart and weekEnd are required" },
+      { error: "periodStart and periodEnd are required" },
       { status: 400 }
     );
   }
 
-  const periodStart = weekStart.slice(0, 10);
-  const periodEnd = weekEnd.slice(0, 10);
-  const periodLabel = buildPeriodLabel(periodStart, periodEnd);
-
-  // Fetch episodes in the requested date range
+  // Fetch episodes in the requested date range (inclusive)
   const { data, error } = await supabase
     .from("episodes")
     .select("*")
-    .gte("started_at", weekStart)
-    .lte("started_at", weekEnd)
+    .gte("started_at", periodStart + "T00:00:00Z")
+    .lte("started_at", periodEnd + "T23:59:59Z")
     .order("started_at", { ascending: true });
 
   if (error) {
@@ -283,7 +334,7 @@ export async function POST(request: Request) {
   );
 
   if (reportable.length === 0) {
-    return Response.json({ error: 'no_episodes' }, { status: 422 });
+    return Response.json({ error: "no_episodes" }, { status: 422 });
   }
 
   // ── Phase 1: Claude groups episodes (JSON only, no math) ──────────────────
@@ -308,6 +359,7 @@ Rules:
 - One group per distinct body of work.
 - If a real matter name is not supported by the evidence, describe the work honestly and specifically.
 - Group episodes that clearly belong to the same matter or project, even if they have slightly different case_names.
+- Episodes with work_type="administrative" should go in the "Administrative work" group (is_administrative: true).
 - Every episode_id must appear in exactly one group.
 - Return ONLY the JSON array. No explanation, no markdown fences.
 
@@ -322,9 +374,13 @@ ${episodesSummary}`;
       max_tokens: 2048,
       messages: [{ role: "user", content: groupingPrompt }],
     });
-    const raw = message.content[0].type === "text" ? message.content[0].text : "[]";
+    const raw =
+      message.content[0].type === "text" ? message.content[0].text : "[]";
     // Strip any accidental markdown fences
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
+    const cleaned = raw
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```\s*$/i, "")
+      .trim();
     claudeGroups = JSON.parse(cleaned);
     if (!Array.isArray(claudeGroups)) throw new Error("Expected JSON array");
   } catch (err: unknown) {
@@ -335,7 +391,7 @@ ${episodesSummary}`;
     );
   }
 
-  // ── Phase 2: TypeScript calculates all totals ──────────────────────────────
+  // ── Phase 2: TypeScript calculates all totals (from actual data) ───────────
 
   const groups = buildGroups(claudeGroups, reportable);
 
@@ -347,17 +403,18 @@ ${episodesSummary}`;
     .reduce((s, g) => s + g.totalMinutes, 0);
   const totalMinutes = caseMinutes + adminMinutes;
 
-  // ── Phase 3: Render report text ────────────────────────────────────────────
+  // ── Phase 3: Render report text (rounded for display if requested) ──────────
 
   const report = renderReport(
     groups,
     periodLabel,
     caseMinutes,
     adminMinutes,
-    totalMinutes
+    totalMinutes,
+    roundTo15
   );
 
-  // Summary JSON for re-render / audit
+  // Summary JSON stores actual (unrounded) totals
   const summaryJson: ReportSummary = {
     periodLabel,
     groups: groups.map((g) => ({
@@ -371,7 +428,7 @@ ${episodesSummary}`;
     totalMinutes,
   };
 
-  // Persist report to DB
+  // Always INSERT new row (never update)
   let savedId: string | null = null;
   try {
     const { data: savedReport, error: saveErr } = await supabase
@@ -388,7 +445,7 @@ ${episodesSummary}`;
         content: report,
         version: 1,
       })
-      .select('id')
+      .select("id")
       .single();
     if (saveErr) {
       console.error("[report] failed to save to DB:", saveErr);

@@ -71,7 +71,7 @@ export default async function FilesPage() {
     supabase
       .from("episodes")
       .select(
-        "id, case_name, started_at, ended_at, duration_minutes, key_observations, is_reportable, created_at"
+        "id, case_name, work_type, started_at, ended_at, duration_minutes, key_observations, is_reportable, created_at"
       )
       .eq("user_id", user.id)
       .eq("is_reportable", true)

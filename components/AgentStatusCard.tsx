@@ -1,3 +1,4 @@
+/* ARCHIVED: desktop-agent only — not mounted in active product */
 'use client'
 
 import { useEffect, useRef, useState } from 'react'

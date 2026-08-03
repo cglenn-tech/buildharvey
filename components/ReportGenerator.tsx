@@ -16,10 +16,18 @@ function isoSunday(monday: string): string {
   return d.toISOString().slice(0, 10);
 }
 
+function localIsoDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 export default function ReportGenerator() {
   const todayMonday = isoMonday(new Date());
   const [from, setFrom] = useState(todayMonday);
   const [to, setTo] = useState(isoSunday(todayMonday));
+  const [roundTo15, setRoundTo15] = useState(false);
   const [report, setReport] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -29,31 +37,34 @@ export default function ReportGenerator() {
   const [noEpisodes, setNoEpisodes] = useState(false);
 
   // Load previously saved report when date range changes
-  const loadSaved = useCallback(async (periodStart: string, periodEnd: string) => {
-    setLoading(true);
-    setReport(null);
-    setSaved(false);
-    setReportId(null);
-    setError(null);
-    setNoEpisodes(false);
-    try {
-      const res = await fetch(
-        `/api/report?periodStart=${periodStart}&periodEnd=${periodEnd}`
-      );
-      if (res.ok) {
-        const json = await res.json();
-        if (json?.content) {
-          setReport(json.content);
-          setSaved(true);
-          setReportId(json.id ?? null);
+  const loadSaved = useCallback(
+    async (periodStart: string, periodEnd: string) => {
+      setLoading(true);
+      setReport(null);
+      setSaved(false);
+      setReportId(null);
+      setError(null);
+      setNoEpisodes(false);
+      try {
+        const res = await fetch(
+          `/api/report?periodStart=${periodStart}&periodEnd=${periodEnd}`
+        );
+        if (res.ok) {
+          const json = await res.json();
+          if (json?.content) {
+            setReport(json.content);
+            setSaved(true);
+            setReportId(json.id ?? null);
+          }
         }
+      } catch {
+        // Non-fatal: silently skip pre-fill if load fails
+      } finally {
+        setLoading(false);
       }
-    } catch {
-      // Non-fatal: silently skip pre-fill if load fails
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    },
+    []
+  );
 
   useEffect(() => {
     loadSaved(from, to);
@@ -73,6 +84,18 @@ export default function ReportGenerator() {
     setTo(isoSunday(mon));
   }
 
+  function setThisMonth() {
+    const now = new Date();
+    setFrom(localIsoDate(new Date(now.getFullYear(), now.getMonth(), 1)));
+    setTo(localIsoDate(new Date(now.getFullYear(), now.getMonth() + 1, 0)));
+  }
+
+  function setLastMonth() {
+    const now = new Date();
+    setFrom(localIsoDate(new Date(now.getFullYear(), now.getMonth() - 1, 1)));
+    setTo(localIsoDate(new Date(now.getFullYear(), now.getMonth(), 0)));
+  }
+
   async function generate() {
     setGenerating(true);
     setReport(null);
@@ -84,10 +107,7 @@ export default function ReportGenerator() {
       const res = await fetch("/api/report", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          weekStart: from + "T00:00:00Z",
-          weekEnd: to + "T23:59:59Z",
-        }),
+        body: JSON.stringify({ periodStart: from, periodEnd: to, roundTo15 }),
       });
       let json: { error?: string; report?: string; id?: string };
       try {
@@ -95,7 +115,7 @@ export default function ReportGenerator() {
       } catch {
         throw new Error(`Server error (${res.status})`);
       }
-      if (res.status === 422 && json.error === 'no_episodes') {
+      if (res.status === 422 && json.error === "no_episodes") {
         setNoEpisodes(true);
         return;
       }
@@ -118,7 +138,9 @@ export default function ReportGenerator() {
 
       <div className="flex flex-wrap gap-4 items-end mb-3">
         <div>
-          <label className="block text-xs text-neutral-500 mb-1">Date From</label>
+          <label className="block text-xs text-neutral-500 mb-1">
+            Date From
+          </label>
           <input
             type="date"
             value={from}
@@ -143,11 +165,11 @@ export default function ReportGenerator() {
           className="text-sm font-medium bg-neutral-900 text-white px-4 py-1.5 rounded
                      hover:bg-neutral-700 transition-colors disabled:opacity-40"
         >
-          {generating ? "Generating…" : "Generate Weekly Report"}
+          {generating ? "Generating\u2026" : "Generate Report"}
         </button>
       </div>
 
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2 mb-3">
         <button
           onClick={setThisWeek}
           className="text-xs text-neutral-500 hover:text-neutral-800 border border-neutral-200
@@ -162,11 +184,36 @@ export default function ReportGenerator() {
         >
           Last Week
         </button>
+        <button
+          onClick={setThisMonth}
+          className="text-xs text-neutral-500 hover:text-neutral-800 border border-neutral-200
+                     rounded px-2 py-0.5 transition-colors"
+        >
+          This Month
+        </button>
+        <button
+          onClick={setLastMonth}
+          className="text-xs text-neutral-500 hover:text-neutral-800 border border-neutral-200
+                     rounded px-2 py-0.5 transition-colors"
+        >
+          Last Month
+        </button>
       </div>
 
-      {error && (
-        <p className="mt-3 text-xs text-red-500">{error}</p>
-      )}
+      <div className="flex items-center gap-2 mb-1">
+        <input
+          id="round-to-15"
+          type="checkbox"
+          checked={roundTo15}
+          onChange={(e) => setRoundTo15(e.target.checked)}
+          className="rounded border-neutral-300"
+        />
+        <label htmlFor="round-to-15" className="text-xs text-neutral-600">
+          Round to nearest 15 min
+        </label>
+      </div>
+
+      {error && <p className="mt-3 text-xs text-red-500">{error}</p>}
 
       {noEpisodes && !report && (
         <p className="mt-3 text-xs text-neutral-500">
@@ -175,7 +222,9 @@ export default function ReportGenerator() {
       )}
 
       {loading && (
-        <p className="mt-3 text-xs text-neutral-400">Loading saved report…</p>
+        <p className="mt-3 text-xs text-neutral-400">
+          Loading saved report\u2026
+        </p>
       )}
 
       {report && (
@@ -183,10 +232,10 @@ export default function ReportGenerator() {
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2 flex-wrap">
               <p className="text-xs font-semibold uppercase tracking-widest text-neutral-400">
-                Weekly Report
+                Report
               </p>
               {saved && (
-                <span className="text-xs text-neutral-400">· Saved</span>
+                <span className="text-xs text-neutral-400">&middot; Saved</span>
               )}
               {saved && reportId && (
                 <a
@@ -198,7 +247,10 @@ export default function ReportGenerator() {
               )}
             </div>
             <button
-              onClick={() => { setReport(null); setSaved(false); }}
+              onClick={() => {
+                setReport(null);
+                setSaved(false);
+              }}
               className="text-xs text-neutral-400 hover:text-neutral-700"
             >
               Dismiss

@@ -32,6 +32,7 @@ a = Analysis(
         'psutil', 'mss', 'pytesseract', 'PIL',
         'anthropic', 'pywinauto',
         'websockets', 'websockets.asyncio.server',
+        'realtime', 'realtime.client', 'realtime.channel', 'realtime.types',
     ],
     hookspath=[],
     noarchive=False,

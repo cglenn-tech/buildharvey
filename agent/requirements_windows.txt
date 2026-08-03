@@ -11,6 +11,7 @@ python-dotenv
 spacy
 anthropic
 websockets
+realtime>=2.0.0
 
 # Windows credential storage
 keyring

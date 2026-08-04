@@ -20,6 +20,8 @@ const ERROR_MESSAGES: Record<string, string> = {
   download_failed:               'Download failed. Please try again.',
 }
 
+const WIN_VERSION = process.env.NEXT_PUBLIC_WINDOWS_INSTALLER_VERSION
+
 function triggerDownload(url: string) {
   const a = document.createElement('a')
   a.href = url
@@ -53,10 +55,18 @@ export default function DownloadButton({ label }: Props) {
     if (state.status === 'preparing') return
     setState({ status: 'preparing' })
 
-    const endpoint = platform === 'windows' ? '/api/download/windows' : '/api/download'
+    if (platform === 'windows') {
+      // Navigate directly to the endpoint which returns a 302 redirect to the
+      // GitHub release asset. The browser follows the redirect and downloads
+      // the .exe without navigating away from the current page.
+      triggerDownload('/api/download/windows')
+      setState({ status: 'started', url: '/api/download/windows' })
+      return
+    }
 
+    // macOS: fetch signed URL then trigger download
     try {
-      const res = await fetch(endpoint, { method: 'POST' })
+      const res = await fetch('/api/download', { method: 'POST' })
       const json = await res.json()
 
       if (res.status === 401) {
@@ -91,6 +101,8 @@ export default function DownloadButton({ label }: Props) {
     }
   }
 
+  const winFilename = WIN_VERSION ? `BuildHarveySetup-${WIN_VERSION}.exe` : 'BuildHarveySetup.exe'
+
   const buttonLabel =
     state.status === 'preparing' ? 'Preparing download…'
     : state.status === 'failed'  ? 'Try again'
@@ -109,6 +121,12 @@ export default function DownloadButton({ label }: Props) {
         {state.status === 'unavailable' ? 'Unavailable' : buttonLabel}
       </button>
 
+      {platform === 'windows' && WIN_VERSION && state.status === 'idle' && (
+        <p className="text-xs text-neutral-400 mt-1">
+          {winFilename} · Version {WIN_VERSION}
+        </p>
+      )}
+
       {state.status === 'failed' && (
         <p className="text-sm text-red-600 mt-3">{state.message}</p>
       )}
@@ -118,7 +136,7 @@ export default function DownloadButton({ label }: Props) {
           <p>Your download has started.</p>
           {platform === 'windows' ? (
             <>
-              <p>Run <strong>BuildHarveySetup.exe</strong> to install BuildHarvey.</p>
+              <p>Run <strong>{winFilename}</strong> to install BuildHarvey.</p>
               <p className="text-neutral-500 text-xs mt-1">
                 If Windows shows a SmartScreen warning, click{' '}
                 <strong>More info</strong> then <strong>Run anyway</strong>.

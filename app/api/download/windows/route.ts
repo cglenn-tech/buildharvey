@@ -2,6 +2,76 @@ import { getServerClient } from '@/lib/supabase-server'
 import { getAdminClient } from '@/lib/supabase-admin'
 import { rateLimit } from '@/lib/rate-limit'
 
+// ── GitHub release redirect (primary source) ──────────────────────────────────
+
+const APPROVED_GITHUB_HOSTS = new Set([
+  'github.com',
+  'objects.githubusercontent.com',
+  'github-releases.githubusercontent.com',
+])
+
+function validateGithubUrl(url: string): string | null {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return 'unparseable URL'
+  }
+  if (parsed.protocol !== 'https:') return 'URL must use HTTPS'
+  if (!APPROVED_GITHUB_HOSTS.has(parsed.hostname)) {
+    return `${parsed.hostname} is not an approved GitHub release host`
+  }
+  if (!parsed.pathname.endsWith('.exe')) return 'URL must end with .exe'
+  return null
+}
+
+export async function GET() {
+  // 1. Auth check
+  const supabase = await getServerClient()
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser()
+
+  if (authError || !user) {
+    return Response.json({ error: 'authentication_required' }, { status: 401 })
+  }
+
+  // 2. Email confirmation check
+  if (!user.email_confirmed_at) {
+    return Response.json({ error: 'email_verification_required' }, { status: 403 })
+  }
+
+  // 3. Read GitHub release env vars
+  const ghUrl = process.env.WINDOWS_INSTALLER_URL
+  const ghVersion = process.env.WINDOWS_INSTALLER_VERSION
+
+  if (!ghUrl || !ghVersion) {
+    return Response.json({ error: 'release_unavailable' }, { status: 404 })
+  }
+
+  // 4. Validate URL before redirecting
+  const validationError = validateGithubUrl(ghUrl)
+  if (validationError) {
+    console.error('[download/windows] invalid WINDOWS_INSTALLER_URL:', validationError)
+    return Response.json({ error: 'invalid_release_configuration' }, { status: 409 })
+  }
+
+  // 5. Redirect browser directly to GitHub release asset.
+  //    GitHub serves the asset with Content-Disposition: attachment so the browser
+  //    downloads the file without navigating away from the current page.
+  //    Cache-Control: no-store prevents browsers and CDNs from caching the redirect.
+  return new Response(null, {
+    status: 302,
+    headers: {
+      'Location': ghUrl,
+      'Cache-Control': 'no-store',
+    },
+  })
+}
+
+// ── Supabase Storage fallback (kept for future use) ───────────────────────────
+
 export async function POST() {
   // 1. Auth check
   const supabase = await getServerClient()

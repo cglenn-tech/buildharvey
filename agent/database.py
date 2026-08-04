@@ -21,19 +21,28 @@ def save_episode(conn: sqlite3.Connection, episode: Episode) -> None:
     d = episode.to_dict()
     conn.execute("""
         INSERT INTO episodes
-            (id, case_name, started_at, ended_at, duration_minutes, key_observations,
-             created_at, is_reportable)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+            (id, case_name, issue_worked_on, work_type, started_at, ended_at,
+             duration_minutes, active_seconds, key_observations, created_at, is_reportable)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
         ON CONFLICT(id) DO UPDATE SET
             case_name        = excluded.case_name,
+            issue_worked_on  = excluded.issue_worked_on,
+            work_type        = excluded.work_type,
             ended_at         = excluded.ended_at,
             duration_minutes = excluded.duration_minutes,
+            active_seconds   = excluded.active_seconds,
             key_observations = excluded.key_observations
     """, (
-        d["id"], d["case_name"], d["started_at"], d["ended_at"],
-        d["duration_minutes"], json.dumps(d["key_observations"]), d["created_at"],
+        d["id"], d["case_name"], d.get("issue_worked_on"), d.get("work_type", "project"),
+        d["started_at"], d["ended_at"],
+        d["duration_minutes"], d.get("active_seconds"),
+        json.dumps(d["key_observations"]), d["created_at"],
     ))
     conn.commit()
+
+    # Update recent contexts for autocomplete
+    if d.get("case_name"):
+        upsert_recent_context(conn, d["case_name"], d.get("issue_worked_on"), d.get("work_type", "project"))
 
 
 def mark_synced(conn: sqlite3.Connection, episode_id: str) -> None:
@@ -91,6 +100,46 @@ def get_invalid_ids(conn: sqlite3.Connection) -> list[str]:
     return [r[0] for r in rows]
 
 
+# ── Recent contexts (for UI autocomplete) ─────────────────────────────────────
+
+def get_recent_cases(conn: sqlite3.Connection) -> list[str]:
+    """Return case names ordered by most recently used."""
+    rows = conn.execute(
+        "SELECT case_name FROM recent_contexts ORDER BY last_used DESC LIMIT 50"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def get_recent_issues(conn: sqlite3.Connection, case_name: str) -> list[str]:
+    """Return issue names for a given case, ordered by most recently used."""
+    rows = conn.execute(
+        "SELECT issue FROM recent_contexts WHERE case_name = ? AND issue != '' "
+        "ORDER BY last_used DESC LIMIT 20",
+        (case_name,),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def upsert_recent_context(
+    conn: sqlite3.Connection,
+    case_name: str,
+    issue: Optional[str],
+    work_type: str,
+) -> None:
+    """Insert or update a recent context record for autocomplete."""
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    # Use empty string as sentinel for NULL issue so the UNIQUE(case_name, issue) works.
+    issue_key = issue or ""
+    conn.execute("""
+        INSERT INTO recent_contexts (case_name, issue, work_type, last_used, use_count)
+        VALUES (?, ?, ?, ?, 1)
+        ON CONFLICT(case_name, issue) DO UPDATE SET
+            last_used = excluded.last_used,
+            use_count = use_count + 1
+    """, (case_name, issue_key, work_type, now))
+    conn.commit()
+
+
 # ── Schema management ─────────────────────────────────────────────────────────
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -109,9 +158,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
             CREATE TABLE episodes (
                 id               TEXT PRIMARY KEY,
                 case_name        TEXT NOT NULL,
+                issue_worked_on  TEXT,
+                work_type        TEXT NOT NULL DEFAULT 'project',
                 started_at       TEXT NOT NULL,
                 ended_at         TEXT,
                 duration_minutes REAL,
+                active_seconds   REAL,
                 key_observations TEXT NOT NULL DEFAULT '[]',
                 created_at       TEXT NOT NULL,
                 synced_at        TEXT,
@@ -119,10 +171,34 @@ def _migrate(conn: sqlite3.Connection) -> None:
             )
         """)
         conn.commit()
-        return
-
-    # Add is_reportable column if missing from an existing table
-    if "is_reportable" not in cols:
-        print("[db] adding is_reportable column")
-        conn.execute("ALTER TABLE episodes ADD COLUMN is_reportable INTEGER NOT NULL DEFAULT 1")
+    else:
+        # Add missing columns to existing installations
+        if "is_reportable" not in cols:
+            print("[db] adding is_reportable column")
+            conn.execute("ALTER TABLE episodes ADD COLUMN is_reportable INTEGER NOT NULL DEFAULT 1")
+        if "issue_worked_on" not in cols:
+            print("[db] adding issue_worked_on column")
+            conn.execute("ALTER TABLE episodes ADD COLUMN issue_worked_on TEXT")
+        if "work_type" not in cols:
+            print("[db] adding work_type column")
+            conn.execute("ALTER TABLE episodes ADD COLUMN work_type TEXT NOT NULL DEFAULT 'project'")
+        if "active_seconds" not in cols:
+            print("[db] adding active_seconds column")
+            conn.execute("ALTER TABLE episodes ADD COLUMN active_seconds REAL")
         conn.commit()
+
+    # Create recent_contexts table for UI autocomplete.
+    # issue uses '' as sentinel for "no issue" so UNIQUE(case_name, issue) works
+    # across all SQLite versions (COALESCE in UNIQUE is only in SQLite 3.38+).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS recent_contexts (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_name TEXT NOT NULL,
+            issue     TEXT NOT NULL DEFAULT '',
+            work_type TEXT NOT NULL DEFAULT 'project',
+            last_used TEXT NOT NULL,
+            use_count INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(case_name, issue)
+        )
+    """)
+    conn.commit()

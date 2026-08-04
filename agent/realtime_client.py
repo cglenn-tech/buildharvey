@@ -165,6 +165,18 @@ def set_status(state: str) -> None:
         asyncio.run_coroutine_threadsafe(_broadcast_status(state), loop)
 
 
+def broadcast_daily_review() -> None:
+    """
+    Broadcast a 'daily_review' event to connected browser tabs.
+    Called when the user clicks Stop Work Session so the web app can show
+    the DailyReviewModal without a page refresh.
+    Thread-safe; no-op if Realtime is not connected.
+    """
+    loop = _event_loop
+    if loop is not None and not loop.is_closed():
+        asyncio.run_coroutine_threadsafe(_broadcast_event('daily_review', {}), loop)
+
+
 def force_stop() -> None:
     """
     Immediately stop recording. Called on OS sleep, logout, or user switch.
@@ -197,6 +209,15 @@ async def _broadcast_status(state: str) -> None:
     if ch is not None:
         try:
             await ch.send_broadcast('status', {'state': state})
+        except Exception:
+            pass
+
+
+async def _broadcast_event(event: str, payload: dict) -> None:
+    ch = _channel
+    if ch is not None:
+        try:
+            await ch.send_broadcast(event, payload)
         except Exception:
             pass
 

@@ -19,6 +19,16 @@ function fmtDur(minutes: number): string {
   return h > 0 ? `${h}h ${m}m` : `${m}m`
 }
 
+function fmtActiveSec(seconds: number | null | undefined): string | null {
+  if (seconds == null) return null
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = Math.round(seconds % 60)
+  if (h > 0) return `${h}h ${m}m active`
+  if (m > 0) return `${m}m ${s}s active`
+  return `${s}s active`
+}
+
 function fmtUtcTime(iso: string): string {
   return new Date(iso).toLocaleTimeString('en-US', {
     hour: 'numeric',
@@ -137,6 +147,11 @@ export default async function ProjectPage({
                   <p className="text-xs text-neutral-400 mb-1">
                     {fmtUtcTime(ep.started_at)} &ndash; {fmtUtcTime(ep.ended_at)}{' '}
                     &middot; {fmtDur(ep.duration_minutes)}
+                    {fmtActiveSec(ep.active_seconds) && (
+                      <span className="ml-2 text-neutral-300">
+                        ({fmtActiveSec(ep.active_seconds)})
+                      </span>
+                    )}
                   </p>
 
                   {/* Issue worked on */}

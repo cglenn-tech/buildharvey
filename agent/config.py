@@ -22,7 +22,9 @@ DIFF_THRESHOLD = 0.02           # fraction of pixels that must change to be mean
 DIFF_RESIZE = (320, 180)        # thumbnail size for cheap diff comparison
 
 # ── Episode lifecycle ─────────────────────────────────────────────────────────
-INACTIVITY_TIMEOUT_SECONDS = 600        # idle this long → close episode (10 min)
+INACTIVITY_PAUSE_SECONDS = 300          # idle this long → pause timing (don't close episode)
+INACTIVITY_TIMEOUT_SECONDS = 300        # alias for INACTIVITY_PAUSE_SECONDS (kept for test compat)
+MAX_EPISODE_SECONDS = 28800             # close episode after 8 h regardless (safety net)
 ADMIN_GRACE_SECONDS = 60                # no-case activity allowed before switching to Administrative
 CASE_SWITCH_THRESHOLD = 3               # consecutive observations of the same new case required
                                         # before switching episodes — prevents spurious switches

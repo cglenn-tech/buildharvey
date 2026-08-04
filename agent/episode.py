@@ -2,19 +2,22 @@
 Episode data model.
 
 An Episode represents exactly one work subject.
-case_name is set exclusively by Claude — never by OCR or NER alone.
+case_name is authoritative when task_context.is_set; otherwise set by Claude.
 
 Lifecycle:
-  1. Episode opens when Claude returns a valid suggested_episode_name.
+  1. Episode opens when the user provides case context (authoritative) or
+     Claude returns a valid suggested_episode_name (unattended mode).
   2. ScreenshotEvidence accumulates in _evidence (primary).
   3. RawObservations accumulate in _raw_observations (context tracking only).
-  4. Episode closes when Claude signals a new objective or inactivity fires.
-  5. The finalizer synthesizes _evidence → key_observations.
-  6. The finalized Episode is persisted and synced.
+  4. Episode pauses after 5 min of inactivity; resumes on new meaningful activity.
+  5. Episode closes on user request, switch confirmation, or 8-h safety net.
+  6. The finalizer synthesizes _evidence → key_observations.
+  7. The finalized Episode is persisted and synced.
 
 Episodes are structured memory for the report generator.
 They are not reports. They are not displayed to users as-is.
 """
+import calendar
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -90,6 +93,10 @@ class Episode:
     ended_at: Optional[str]
     created_at: str = field(default_factory=_iso_now)
 
+    # User-provided context (authoritative when set)
+    issue_worked_on: Optional[str] = None
+    work_type: str = 'project'
+
     # Finalized — set by finalizer.finalize() after close()
     key_observations: list[KeyObservation] = field(default_factory=list)
 
@@ -110,6 +117,11 @@ class Episode:
     # Legacy field kept for compatibility
     entity_counts: dict[str, int] = field(default_factory=dict)
 
+    # Pause tracking — runtime only, not persisted
+    _total_paused_seconds: float = 0.0
+    _pause_started_at: Optional[float] = None
+    _is_paused: bool = False
+
     @property
     def last_activity_at(self) -> float:
         """Alias for last_user_activity_at."""
@@ -124,6 +136,46 @@ class Episode:
             return round((end - start) / 60, 2)
         except Exception:
             return 0.0
+
+    @property
+    def active_seconds(self) -> float:
+        """
+        Elapsed wall-clock seconds minus any time spent paused.
+        Always >= 0.
+        """
+        try:
+            start = calendar.timegm(time.strptime(self.started_at, "%Y-%m-%dT%H:%M:%SZ"))
+            end = (
+                calendar.timegm(time.strptime(self.ended_at, "%Y-%m-%dT%H:%M:%SZ"))
+                if self.ended_at else time.time()
+            )
+            elapsed = max(0.0, end - start)
+            paused = self._total_paused_seconds
+            if self._is_paused and self._pause_started_at is not None:
+                paused += time.time() - self._pause_started_at
+            return max(0.0, elapsed - paused)
+        except Exception:
+            return 0.0
+
+    def pause_timing(self) -> None:
+        """
+        Record the start of a pause.
+        Called when idle threshold is reached. No-op if already paused.
+        """
+        if not self._is_paused:
+            self._pause_started_at = time.time()
+            self._is_paused = True
+
+    def resume_timing(self) -> None:
+        """
+        Accumulate the paused duration and mark as active.
+        Called when new meaningful activity arrives after a pause.
+        No-op if not currently paused.
+        """
+        if self._is_paused and self._pause_started_at is not None:
+            self._total_paused_seconds += time.time() - self._pause_started_at
+            self._pause_started_at = None
+            self._is_paused = False
 
     def add_raw_observation(self, obs) -> None:
         """
@@ -147,6 +199,8 @@ class Episode:
         self.add_raw_observation(obs)
 
     def close(self) -> None:
+        if self._is_paused:
+            self.resume_timing()
         self.ended_at = _iso_now()
 
     def to_dict(self) -> dict:
@@ -159,9 +213,12 @@ class Episode:
         return {
             "id": self.id,
             "case_name": self.case_name,
+            "issue_worked_on": self.issue_worked_on,
+            "work_type": self.work_type,
             "started_at": self.started_at,
             "ended_at": self.ended_at or _iso_now(),
             "duration_minutes": self.duration_minutes,
+            "active_seconds": round(self.active_seconds, 1),
             "key_observations": [o.to_dict() for o in self.key_observations],
             "created_at": self.created_at,
             "evidence_paths": list(self.evidence_paths),
@@ -170,14 +227,23 @@ class Episode:
 
 # ── Factory ───────────────────────────────────────────────────────────────────
 
-def new_episode(case_name: str) -> Episode:
+def new_episode(
+    case_name: str,
+    issue_worked_on: Optional[str] = None,
+    work_type: str = 'project',
+) -> Episode:
     """
-    Create a new Episode. case_name must come from Claude — never from OCR/NER.
-    The engine only calls this when Claude has returned a valid suggested_episode_name.
+    Create a new Episode.
+
+    In authoritative mode (user provided case context), case_name and issue_worked_on
+    come from task_context. In unattended mode, case_name comes from Claude's
+    suggested_episode_name and issue_worked_on is None.
     """
     return Episode(
         id=str(uuid.uuid4()),
         case_name=case_name,
+        issue_worked_on=issue_worked_on,
+        work_type=work_type,
         started_at=_iso_now(),
         ended_at=None,
     )

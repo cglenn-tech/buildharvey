@@ -12,6 +12,7 @@ export type Episode = {
   started_at: string;
   ended_at: string;
   duration_minutes: number;
+  active_seconds?: number | null;
   key_observations: KeyObservation[];
   created_at: string;
   is_reportable?: boolean;

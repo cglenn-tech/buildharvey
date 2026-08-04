@@ -5,7 +5,7 @@ Runs as a menu-bar (tray) app with no Dock icon and no GUI window.
 All user-facing UI lives on buildharvey.com.
 
 Startup flow:
-  1. If no credential stored → open browser at https://buildharvey.com and poll.
+  1. If no credential stored → call auth.activate() to register device and poll for approval.
   2. If screen recording permission not granted → show NSAlert + open System Settings.
   3. Launch the capture loop in a background thread.
   4. Register for macOS sleep/session-resign notifications → force-stop on sleep.
@@ -15,7 +15,6 @@ Menu bar icon:
   🟢  recording
 """
 import threading
-import time
 import webbrowser
 
 from dotenv import load_dotenv
@@ -33,6 +32,7 @@ class AppDelegate(AppKit.NSObject):
     _stop_event = objc.ivar()
     _status_item = objc.ivar()
     _label_item = objc.ivar()
+    _connect_item = objc.ivar()
 
     def applicationDidFinishLaunching_(self, notification):
         # No Dock icon — pure menu-bar accessory
@@ -53,6 +53,13 @@ class AppDelegate(AppKit.NSObject):
             "BuildHarvey: Idle", None, ""
         )
         menu.addItem_(self._label_item)
+        menu.addItem_(AppKit.NSMenuItem.separatorItem())
+
+        self._connect_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Connect Account…", "connectAccount:", ""
+        )
+        self._connect_item.setTarget_(self)
+        menu.addItem_(self._connect_item)
         menu.addItem_(AppKit.NSMenuItem.separatorItem())
 
         open_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -104,15 +111,20 @@ class AppDelegate(AppKit.NSObject):
         """Run credential check, permission check, then start the agent."""
         # 1. Ensure credential
         if not auth.read_credential():
-            webbrowser.open("https://buildharvey.com")
-            print("[app] No credential — browser opened for setup")
-            for _ in range(360):   # poll up to 30 min (5 s × 360)
-                time.sleep(5)
-                if auth.read_credential():
-                    break
-            else:
-                print("[app] Timed out waiting for credential")
+            import platform as _platform
+            device_name = _platform.node() or 'My Mac'
+            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                lambda: self._label_item.setTitle_("BuildHarvey: Connecting…")
+            )
+            print(f"[app] No credential — activating device '{device_name}'")
+            token = auth.activate(device_name=device_name)
+            if not token:
+                print("[app] Activation failed or timed out")
+                AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                    lambda: self._label_item.setTitle_("BuildHarvey: Not connected")
+                )
                 return
+            auth.store_credential(token)
 
         # 2. Check screen recording permission
         status = permissions.check()
@@ -123,6 +135,12 @@ class AppDelegate(AppKit.NSObject):
             return
 
         self.startAgent()
+
+    def connectAccount_(self, sender):
+        """Re-trigger activation if no credential is stored (e.g. after timeout)."""
+        if auth.read_credential():
+            return
+        threading.Thread(target=self._startup, daemon=True).start()
 
     def _prompt_permissions(self):
         alert = AppKit.NSAlert.alloc().init()

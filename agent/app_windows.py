@@ -23,7 +23,6 @@ if getattr(sys, 'frozen', False):
 
 import threading
 import time
-import webbrowser
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -46,15 +45,14 @@ class WindowsApp:
             print(f'[app_windows] session monitor unavailable: {exc}')
 
         if not auth.read_credential():
-            webbrowser.open("https://buildharvey.com")
-            print("[app] No credential — browser opened for setup")
-            for _ in range(360):   # poll up to 30 min
-                time.sleep(5)
-                if auth.read_credential():
-                    break
-            else:
-                print("[app] Timed out waiting for credential")
+            import platform as _platform
+            device_name = _platform.node() or 'My PC'
+            print(f"[app] No credential — activating device '{device_name}'")
+            token = auth.activate(device_name=device_name)
+            if not token:
+                print("[app] Activation failed or timed out")
                 return
+            auth.store_credential(token)
 
         threading.Thread(
             target=main.main,

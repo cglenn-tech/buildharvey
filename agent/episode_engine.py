@@ -1,18 +1,16 @@
 """
-Episode Engine — hybrid task control state machine.
+Episode Engine — passive auto-grouping state machine.
 
 State machine:
-  IDLE → ACTIVE → SWITCH_SUGGESTION → ACTIVE (or IDLE on safety net / force close)
+  IDLE → ACTIVE → TRANSITIONING → ACTIVE (or IDLE on safety net / force close)
 
 Rules:
-  - When user has set authoritative context: episode name/issue come from task_context,
-    never from Claude's suggested_episode_name.
-  - In unattended mode (no user context): Claude's suggested_episode_name is used.
+  - Claude's suggested_episode_name always drives episode naming.
   - Inactivity > 5 min → pause timing (episode stays open).
   - Inactivity > 8 h → close episode (safety net).
-  - Switch suggestion: held as pending — user must confirm or reject.
-  - confirm_switch(): close current, open new with pending evidence.
-  - reject_switch(): append pending evidence to current, clear suggestion.
+  - 2-signal hysteresis: first start_new_episode → transitioning state.
+    Second consecutive start_new_episode → auto-close current and open new.
+    Any continue_current_episode while transitioning → snap back to active.
 """
 import calendar
 import time
@@ -20,7 +18,6 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 import config
-import task_context as tc
 from episode import Episode, ScreenshotEvidence, new_episode
 from observer import Observation
 
@@ -34,16 +31,11 @@ class EngineResult:
 class EpisodeEngine:
     def __init__(self) -> None:
         self.active: Optional[Episode] = None
-        self._state: Literal["idle", "active", "switch_suggestion"] = "idle"
+        self._state: Literal["idle", "active", "transitioning"] = "idle"
 
-        # Authoritative context from the user (set via set_authoritative_context)
-        self._authoritative_case: str = ""
-        self._authoritative_issue: Optional[str] = None
-        self._authoritative_work_type: str = "project"
-
-        # Evidence held during a switch suggestion (never attached to wrong episode)
-        self._pending_evidence: list[ScreenshotEvidence] = []
-        self._pending_new_name: str = ""
+        # 2-signal hysteresis fields
+        self._consecutive_new_episode: int = 0
+        self._candidate_name: str = ""
 
         # In-memory metadata context (app/URL/window) — never persisted
         self._current_app: str = ""
@@ -51,22 +43,6 @@ class EpisodeEngine:
         self._current_window: str = ""
 
     # ── Public API ─────────────────────────────────────────────────────────────
-
-    def set_authoritative_context(
-        self,
-        case_name: str,
-        issue_worked_on: Optional[str],
-        work_type: str,
-    ) -> None:
-        """
-        Called by main.py each cycle when task_context.is_set is True.
-        Sets the authoritative values used by _open_episode() and _continue_episode().
-        Does NOT immediately change an active episode's name — that only happens
-        on the next open or explicit update.
-        """
-        self._authoritative_case = case_name
-        self._authoritative_issue = issue_worked_on
-        self._authoritative_work_type = work_type
 
     def ingest_vision(
         self, evidence: Optional[ScreenshotEvidence], obs: Observation
@@ -85,14 +61,16 @@ class EpisodeEngine:
         if self._state == "idle":
             return self._open_episode(evidence.suggested_episode_name, evidence)
 
-        if self._state == "switch_suggestion":
-            # Hold all evidence pending user decision
-            self._pending_evidence.append(evidence)
-            print(
-                f"[engine] holding evidence in pending "
-                f"({len(self._pending_evidence)} items) — awaiting switch decision"
-            )
-            return EngineResult(active_episode=self.active)
+        if self._state == "transitioning":
+            if evidence.start_new_episode:
+                # Second consecutive signal → confirmed switch
+                return self._close_and_open(self._candidate_name, evidence)
+            else:
+                # continue_current_episode while transitioning → snap back
+                self._state = "active"
+                self._consecutive_new_episode = 0
+                self._candidate_name = ""
+                return self._continue_episode(evidence)
 
         # state == "active"
         if evidence.continue_current_episode:
@@ -174,7 +152,6 @@ class EpisodeEngine:
         # Pause after 5 min idle (episode stays open)
         if idle > config.INACTIVITY_PAUSE_SECONDS and not self.active._is_paused:
             self.active.pause_timing()
-            tc.set_timing_paused(True)
             print(
                 f"[engine] timing paused: '{self.active.case_name}' "
                 f"[idle {idle:.0f}s]"
@@ -182,100 +159,12 @@ class EpisodeEngine:
 
         return None
 
-    def confirm_switch(self, new_name: str = "") -> Optional[EngineResult]:
-        """
-        User confirmed the switch suggestion.
-        Closes the current episode, opens a new one with pending evidence attached.
-
-        new_name="" → use the pending candidate name (or authoritative context).
-        new_name="Smith v. Jones" → use that specific name.
-        """
-        if self._state != "switch_suggestion" or not self.active:
-            return None
-
-        # Determine the name for the new episode
-        candidate = new_name or self._pending_new_name
-        if self._authoritative_case:
-            # If user has authoritative context, switch means a new authoritative context
-            # (the app should have updated task_context before calling confirm_switch)
-            ctx = tc.get_context()
-            if ctx.is_set:
-                open_name = ctx.case_name
-                open_issue = ctx.issue_worked_on or None
-                open_work_type = ctx.work_type
-            else:
-                open_name = candidate
-                open_issue = None
-                open_work_type = "project"
-        else:
-            open_name = candidate
-            open_issue = None
-            open_work_type = "project"
-
-        # Close current episode
-        closed = self.active
-        closed.close()
-        print(
-            f"[engine] switch confirmed — closing: '{closed.case_name}' "
-            f"({closed.duration_minutes:.0f}min)"
-        )
-
-        # Open new episode
-        ep = new_episode(open_name, issue_worked_on=open_issue, work_type=open_work_type)
-        ep._objective = ""
-
-        # Attach pending evidence to the new episode
-        for ev in self._pending_evidence:
-            ep._evidence.append(ev)
-            ep.last_meaningful_evidence_at = time.time()
-        self._pending_evidence = []
-
-        self.active = ep
-        self._state = "active"
-        self._pending_new_name = ""
-        tc.clear_switch_suggestion()
-        tc.set_timing_paused(False)
-        print(f"[engine] episode opened: {ep.case_name}")
-        return EngineResult(active_episode=ep, closed_episode=closed)
-
-    def reject_switch(self) -> Optional[EngineResult]:
-        """
-        User rejected the switch suggestion.
-        Appends pending evidence to the current episode and clears the suggestion.
-        """
-        if self._state != "switch_suggestion" or not self.active:
-            return None
-
-        ep = self.active
-        for ev in self._pending_evidence:
-            ep._evidence.append(ev)
-            ep.last_user_activity_at = time.time()
-            ep.last_meaningful_evidence_at = time.time()
-
-        count = len(self._pending_evidence)
-        self._pending_evidence = []
-        self._state = "active"
-        self._pending_new_name = ""
-        tc.clear_switch_suggestion()
-        print(
-            f"[engine] switch rejected — continuing: '{ep.case_name}' "
-            f"({count} pending evidence items merged)"
-        )
-        return EngineResult(active_episode=ep)
-
     def force_close_active(self) -> Optional[Episode]:
         """
-        Immediately close and return the active episode on explicit user Stop.
-        Pending evidence (if any) is merged into current episode before closing.
+        Immediately close and return the active episode on explicit web Stop signal.
         """
         if not self.active:
             return None
-
-        # Merge any pending evidence into current episode before closing
-        for ev in self._pending_evidence:
-            self.active._evidence.append(ev)
-        self._pending_evidence = []
-
         return self._force_close(reason="user stop")
 
     # ── Private helpers ────────────────────────────────────────────────────────
@@ -283,28 +172,18 @@ class EpisodeEngine:
     def _open_episode(
         self, suggested_name: str, evidence: ScreenshotEvidence
     ) -> EngineResult:
-        # Use authoritative context when set; fall back to Claude's suggestion
-        if self._authoritative_case:
-            name = self._authoritative_case
-            issue = self._authoritative_issue
-            work_type = self._authoritative_work_type
-        else:
-            name = suggested_name
-            issue = None
-            work_type = "project"
-
-        ep = new_episode(name, issue_worked_on=issue, work_type=work_type)
+        ep = new_episode(suggested_name, issue_worked_on=None, work_type="project")
         ep._objective = evidence.objective
         ep._evidence.append(evidence)
         ep.last_meaningful_evidence_at = time.time()
 
-        # Resume timing in case this was opened after a pause (e.g. new session)
+        # Resume timing in case this was opened after a pause
         ep.resume_timing()
-        tc.set_timing_paused(False)
 
         self.active = ep
         self._state = "active"
-        self._pending_new_name = ""
+        self._consecutive_new_episode = 0
+        self._candidate_name = ""
         print(f"[engine] episode opened: {ep.case_name}")
         return EngineResult(active_episode=ep)
 
@@ -317,56 +196,57 @@ class EpisodeEngine:
         # Resume timing if we were paused
         if ep._is_paused:
             ep.resume_timing()
-            tc.set_timing_paused(False)
             print(f"[engine] timing resumed: {ep.case_name}")
 
-        # Update name/objective only in unattended mode (no authoritative case)
-        if not self._authoritative_case:
-            if (
-                evidence.suggested_episode_name
-                and evidence.suggested_episode_name != ep.case_name
-                and len(evidence.suggested_episode_name) > len(ep.case_name)
-            ):
-                old_name = ep.case_name
-                ep.case_name = evidence.suggested_episode_name
-                ep._objective = evidence.objective
-                print(f"[engine] episode name updated: '{old_name}' → '{ep.case_name}'")
-            elif evidence.objective and not ep._objective:
-                ep._objective = evidence.objective
-        else:
-            # Authoritative mode: update objective only, never case_name
-            if evidence.objective and not ep._objective:
-                ep._objective = evidence.objective
+        # Allow Claude to refine the name toward something more specific
+        if (
+            evidence.suggested_episode_name
+            and evidence.suggested_episode_name != ep.case_name
+            and len(evidence.suggested_episode_name) > len(ep.case_name)
+        ):
+            old_name = ep.case_name
+            ep.case_name = evidence.suggested_episode_name
+            ep._objective = evidence.objective
+            print(f"[engine] episode name updated: '{old_name}' → '{ep.case_name}'")
+        elif evidence.objective and not ep._objective:
+            ep._objective = evidence.objective
 
         print(f"[engine] episode continued: {ep.case_name}")
         return EngineResult(active_episode=ep)
 
     def _handle_transition(self, evidence: ScreenshotEvidence) -> EngineResult:
         """
-        Handle a start_new_episode signal.
-        Instead of auto-closing (old behavior), set a switch suggestion and
-        hold the evidence in _pending_evidence.
+        First start_new_episode signal → move to transitioning state.
+        Store the candidate name and wait for confirmation on the next cycle.
         """
-        candidate = evidence.suggested_episode_name
-        self._pending_new_name = candidate
-        self._pending_evidence.append(evidence)
-        self._state = "switch_suggestion"
-        tc.set_switch_suggestion(candidate)
+        self._candidate_name = evidence.suggested_episode_name
+        self._consecutive_new_episode = 1
+        self._state = "transitioning"
         print(
-            f"[engine] switch suggestion: '{candidate}' "
+            f"[engine] transitioning: candidate '{self._candidate_name}' "
             f"(current: '{self.active.case_name}')"
         )
         return EngineResult(active_episode=self.active)
+
+    def _close_and_open(self, name: str, evidence: ScreenshotEvidence) -> EngineResult:
+        """Auto-close current and open new episode (passive mode, 2-signal confirmed)."""
+        closed = self.active
+        closed.close()
+        self._state = "idle"
+        self.active = None
+        self._consecutive_new_episode = 0
+        self._candidate_name = ""
+        result = self._open_episode(name, evidence)
+        result.closed_episode = closed
+        return result
 
     def _force_close(self, reason: str = "") -> Episode:
         ep = self.active
         ep.close()
         self.active = None
         self._state = "idle"
-        self._pending_evidence = []
-        self._pending_new_name = ""
-        tc.clear_switch_suggestion()
-        tc.set_timing_paused(False)
+        self._consecutive_new_episode = 0
+        self._candidate_name = ""
         print(
             f"[engine] episode finalized: '{ep.case_name}' "
             f"({ep.duration_minutes:.0f}min, {len(ep._evidence)} evidence items)"

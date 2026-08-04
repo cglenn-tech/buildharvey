@@ -1,23 +1,20 @@
 """
-BuildHarvey Desktop Agent.
+BuildHarvey Desktop Agent — headless background daemon.
 
 Run:  python main.py
       (or launched automatically by app.py after credential and permissions are set up)
 
 Loop:
-  1. Check if a work session is active (user clicked Start Task).
-  2. Each cycle: apply authoritative context from task_context (if set).
-  3. Capture screen → extract context → build Observation.
-  4. If screenshot available: POST to /api/agent/vision for Claude analysis.
-     Engine decides: continue current episode, open new, or suggest switch.
-  5. If no screenshot or server returns None: update metadata context only.
-  6. On episode close: finalize → persist to SQLite → enqueue server sync.
-  7. Handle pending user actions: confirm/reject switch, force stop.
+  1. Check if a work session is active (user clicked Start on buildharvey.com).
+  2. Each cycle: capture screen → extract context → build Observation.
+  3. If screenshot available: POST to /api/agent/vision for Claude analysis.
+     Engine passively groups into episodes using 2-signal hysteresis.
+  4. If no screenshot or server returns None: update metadata context only.
+  5. On episode close: finalize → persist to SQLite → enqueue server sync.
+  6. On session end: broadcast daily_review so the web dashboard shows the modal.
 
 Session gate:
-  - Recording begins when the user clicks Start Task in the desktop app.
-  - Browser controls (via Realtime) are secondary and optional.
-  - The desktop app can Start/Stop recording without a browser being open.
+  - Recording begins when the user clicks Start on buildharvey.com (Realtime).
   - A browser refresh or closure does NOT stop recording.
   - Active episode is finalized on Stop.
 
@@ -44,7 +41,6 @@ import finalizer
 import observer
 import realtime_client
 import sync
-import task_context as tc
 import vision
 from episode import Episode
 from episode_engine import EpisodeEngine
@@ -69,10 +65,7 @@ def main(
     engine = EpisodeEngine()
     sync.start()
 
-    _ws_state = 'idle'        # tracks last state broadcast to realtime_client
-    _last_paused = False      # tracks last known pause state for state_callback
-    _last_suggestion = ""     # tracks last known switch suggestion
-    _in_daily_review = False  # suppress 'idle' callback while showing daily review
+    _ws_state = 'idle'   # tracks last state broadcast to realtime_client
 
     while True:
         if stop_event is not None and stop_event.is_set():
@@ -86,43 +79,6 @@ def main(
                 if _ws_state != 'recording':
                     realtime_client.set_status('recording')
                     _ws_state = 'recording'
-
-                # Apply authoritative context from UI each cycle
-                ctx = tc.get_context()
-                if ctx.is_set:
-                    engine.set_authoritative_context(
-                        ctx.case_name,
-                        ctx.issue_worked_on or None,
-                        ctx.work_type,
-                    )
-
-                # Handle pending user actions before running the capture cycle
-                if tc.pop_force_stop():
-                    closed = engine.force_close_active()
-                    if closed:
-                        _close_and_save(conn, closed)
-                    _in_daily_review = True
-                    if state_callback:
-                        state_callback('daily_review')
-                    realtime_client.broadcast_daily_review()
-                    realtime_client.stop_local()
-                    _ws_state = 'idle'
-                    _last_paused = False
-                    _last_suggestion = ""
-                    time.sleep(30)
-                    continue
-
-                confirmed_name = tc.pop_confirm_switch()
-                if confirmed_name is not None:
-                    result = engine.confirm_switch(confirmed_name)
-                    if result and result.closed_episode:
-                        _close_and_save(conn, result.closed_episode)
-                    _last_suggestion = ""
-
-                if tc.pop_reject_switch():
-                    engine.reject_switch()
-                    _last_suggestion = ""
-
                 try:
                     _cycle(conn, engine)
                 except Exception:
@@ -131,29 +87,8 @@ def main(
                         observer.reset()
                     except Exception:
                         pass
-
-                # Update latest activity from most recent evidence
-                if engine.active and engine.active._evidence:
-                    last_ev = engine.active._evidence[-1]
-                    tc.set_latest_activity(last_ev.activity_description or "")
-
-                # Detect pause state change
-                current_paused = tc.is_timing_paused()
-                if current_paused != _last_paused:
-                    _last_paused = current_paused
-                    if state_callback:
-                        state_callback('paused' if current_paused else 'recording')
-
-                # Detect switch suggestion change
-                current_suggestion = tc.get_switch_suggestion()
-                if current_suggestion != _last_suggestion:
-                    _last_suggestion = current_suggestion
-                    if current_suggestion and state_callback:
-                        state_callback(f'switch_suggestion:{current_suggestion}')
-
-                if state_callback and not current_paused and not current_suggestion:
+                if state_callback:
                     state_callback('recording' if engine.active else 'waiting')
-
                 time.sleep(config.CAPTURE_INTERVAL_SECONDS)
             else:
                 # No active work session — finalize and idle
@@ -161,15 +96,12 @@ def main(
                     engine.active.close()
                     _close_and_save(conn, engine.active)
                     engine.active = None
+                    realtime_client.broadcast_daily_review()   # notify web to show review modal
                 if _ws_state != 'idle':
                     realtime_client.set_status('idle')
                     _ws_state = 'idle'
-                _last_paused = False
-                _last_suggestion = ""
-                # Suppress 'idle' callback if we just triggered daily_review
-                if not _in_daily_review and state_callback:
+                if state_callback:
                     state_callback('idle')
-                _in_daily_review = False
                 time.sleep(30)   # check every 30s while idle
         except KeyboardInterrupt:
             print("\n[agent] shutting down")

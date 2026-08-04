@@ -37,11 +37,10 @@ function detectPlatform(): 'macos' | 'windows' | 'other' {
 }
 
 interface Props {
-  version: string
-  sha256: string
+  label?: string
 }
 
-export default function DownloadButton({ version, sha256 }: Props) {
+export default function DownloadButton({ label }: Props) {
   const router = useRouter()
   const [state, setState] = useState<State>({ status: 'idle' })
   const [platform, setPlatform] = useState<'macos' | 'windows' | 'other'>('other')
@@ -54,8 +53,10 @@ export default function DownloadButton({ version, sha256 }: Props) {
     if (state.status === 'preparing') return
     setState({ status: 'preparing' })
 
+    const endpoint = platform === 'windows' ? '/api/download/windows' : '/api/download'
+
     try {
-      const res = await fetch('/api/download', { method: 'POST' })
+      const res = await fetch(endpoint, { method: 'POST' })
       const json = await res.json()
 
       if (res.status === 401) {
@@ -93,7 +94,7 @@ export default function DownloadButton({ version, sha256 }: Props) {
   const buttonLabel =
     state.status === 'preparing' ? 'Preparing download…'
     : state.status === 'failed'  ? 'Try again'
-    : 'Download BuildHarvey'
+    : label ?? 'Download BuildHarvey'
 
   const buttonDisabled =
     state.status === 'preparing' || state.status === 'unavailable'
@@ -117,10 +118,7 @@ export default function DownloadButton({ version, sha256 }: Props) {
           <p>Your download has started.</p>
           {platform === 'windows' ? (
             <>
-              <p>Extract the zip, then run BuildHarvey.exe to start a work session.</p>
-              <p className="text-neutral-500 text-xs mt-1">
-                No installation required. No startup entries created.
-              </p>
+              <p>Run <strong>BuildHarveySetup.exe</strong> to install BuildHarvey.</p>
               <p className="text-neutral-500 text-xs mt-1">
                 If Windows shows a SmartScreen warning, click{' '}
                 <strong>More info</strong> then <strong>Run anyway</strong>.

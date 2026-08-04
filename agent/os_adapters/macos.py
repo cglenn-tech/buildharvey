@@ -111,6 +111,16 @@ class MacOSAdapter:
             check=True,
         )
 
+    def delete_credential(self, account: str = 'device-token') -> None:
+        subprocess.run(
+            [
+                'security', 'delete-generic-password',
+                '-s', self._KEYCHAIN_SERVICE,
+                '-a', account,
+            ],
+            capture_output=True,
+        )
+
     # ── Permissions ──────────────────────────────────────────────────────
 
     def check_screen_permission(self) -> bool:

@@ -355,7 +355,7 @@ async def _connect_once() -> None:
     await channel.subscribe(on_subscribe)
     await asyncio.wait_for(subscribe_done.wait(), timeout=10)
 
-    await channel.track({'type': 'agent', 'state': _current_state})
+    await channel.track({'type': 'agent', 'state': _current_state, 'version': config.APP_VERSION})
     print(f"[realtime] subscribed and tracking on {topic}")
 
     # ── Keep alive until token is near expiry ─────────────────────────────────

@@ -75,6 +75,13 @@ class WindowsAdapter:
         import keyring
         keyring.set_password('com.buildharvey.agent', account, token)
 
+    def delete_credential(self, account: str = 'device-token') -> None:
+        try:
+            import keyring
+            keyring.delete_password('com.buildharvey.agent', account)
+        except Exception:
+            pass
+
     # ── Permissions (no-op on Windows) ───────────────────────────────────
 
     def check_screen_permission(self) -> bool:

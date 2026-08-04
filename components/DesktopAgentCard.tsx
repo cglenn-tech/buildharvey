@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { getBrowserClient } from '@/lib/supabase-browser'
 import AgentStatusCard from './AgentStatusCard'
+import DownloadButton from './DownloadButton'
 
 type DeviceRow = { id: string; last_seen_at: string | null }
 
@@ -51,13 +52,7 @@ export default function DesktopAgentCard() {
           Install the BuildHarvey desktop app to start capturing your work.
           Your browser does not need to stay open while recording.
         </p>
-        <a
-          href="/download"
-          className="text-sm font-medium bg-neutral-900 text-white px-4 py-1.5 rounded
-                     hover:bg-neutral-700 transition-colors inline-block"
-        >
-          Download BuildHarvey
-        </a>
+        <DownloadButton />
       </div>
     )
   }

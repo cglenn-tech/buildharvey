@@ -3,46 +3,74 @@
 import { useEffect, useRef, useState } from 'react'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 import { getBrowserClient } from '@/lib/supabase-browser'
+import DownloadButton from './DownloadButton'
 
 type CardState =
-  | 'connecting'    // subscribed to channel, waiting for agent presence (≤5 s)
-  | 'unavailable'   // no agent in channel after 5 s, or channel error
-  | 'idle'          // agent present, not recording
-  | 'recording'     // agent present, recording active
-  | 'stopping'      // stop sent, waiting for agent confirmation
-  | 'finalizing'    // agent finalizing episode
-  | 'sync_pending'  // agent finished recording, syncing episode
-  | 'error'         // unexpected failure
+  | 'connecting'      // subscribed to channel, waiting for agent presence (≤5 s)
+  | 'unavailable'     // no agent in channel after 5 s, or channel error
+  | 'idle'            // agent present, not recording
+  | 'recording'       // agent present, recording active
+  | 'stopping'        // stop sent, waiting for agent confirmation
+  | 'finalizing'      // agent finalizing episode
+  | 'sync_pending'    // agent finished recording, syncing episode
+  | 'update_required' // agent version below minimum required
+  | 'error'           // unexpected failure
 
 const STATE_LABELS: Record<CardState, string> = {
-  connecting: 'Connecting to desktop app…',
-  unavailable: 'Desktop app not connected',
-  idle: 'Ready to start',
-  recording: 'Recording',
-  stopping: 'Stopping',
-  finalizing: 'Finalizing',
-  sync_pending: 'Sync pending',
-  error: 'Error',
+  connecting:      'Connecting to desktop app…',
+  unavailable:     'Desktop app not connected',
+  idle:            'Ready to start',
+  recording:       'Recording',
+  stopping:        'Stopping',
+  finalizing:      'Finalizing',
+  sync_pending:    'Sync pending',
+  update_required: 'Update required',
+  error:           'Error',
 }
 
 const DOT_COLORS: Record<CardState, string> = {
-  connecting: 'bg-neutral-300',
-  unavailable: 'bg-neutral-300',
-  idle: 'bg-green-400',
-  recording: 'bg-red-500 animate-pulse',
-  stopping: 'bg-yellow-400',
-  finalizing: 'bg-yellow-400',
-  sync_pending: 'bg-yellow-400',
-  error: 'bg-red-400',
+  connecting:      'bg-neutral-300',
+  unavailable:     'bg-neutral-300',
+  idle:            'bg-green-400',
+  recording:       'bg-red-500 animate-pulse',
+  stopping:        'bg-yellow-400',
+  finalizing:      'bg-yellow-400',
+  sync_pending:    'bg-yellow-400',
+  update_required: 'bg-yellow-400',
+  error:           'bg-red-400',
+}
+
+const MIN_VERSION = process.env.NEXT_PUBLIC_MIN_AGENT_VERSION ?? '1.0.0'
+
+function semverLessThan(a: string, b: string): boolean {
+  const pa = a.split('.').map(Number)
+  const pb = b.split('.').map(Number)
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] ?? 0) < (pb[i] ?? 0)) return true
+    if ((pa[i] ?? 0) > (pb[i] ?? 0)) return false
+  }
+  return false
 }
 
 type BuildHarveyPresence = {
   type?: 'agent' | 'browser'
+  version?: string
 }
 
 function isAgentPresence(value: unknown): boolean {
   if (typeof value !== 'object' || value === null) return false
   return (value as BuildHarveyPresence).type === 'agent'
+}
+
+function getAgentVersion(presenceState: Record<string, unknown[]>): string | undefined {
+  for (const presences of Object.values(presenceState)) {
+    for (const p of presences) {
+      if (isAgentPresence(p)) {
+        return (p as BuildHarveyPresence).version
+      }
+    }
+  }
+  return undefined
 }
 
 type Props = { deviceId: string }
@@ -77,6 +105,17 @@ export default function AgentStatusCard({ deviceId }: Props) {
       }
     }
 
+    function handleAgentConnected(presenceState: Record<string, unknown[]>) {
+      clearConnectingTimeout()
+      const version = getAgentVersion(presenceState)
+      if (version && semverLessThan(version, MIN_VERSION)) {
+        setState('update_required')
+      } else {
+        // Ask agent for its current state
+        channel.send({ type: 'broadcast', event: 'status_request', payload: {} })
+      }
+    }
+
     // ── Status broadcast from agent ───────────────────────────────────────────
     channel.on('broadcast', { event: 'status' }, ({ payload }) => {
       const agentState: string = payload?.state ?? ''
@@ -103,9 +142,7 @@ export default function AgentStatusCard({ deviceId }: Props) {
         .some(isAgentPresence)
 
       if (agentPresent) {
-        clearConnectingTimeout()
-        // Request the agent's current status so we know whether it's idle/recording
-        channel.send({ type: 'broadcast', event: 'status_request', payload: {} })
+        handleAgentConnected(presenceState)
       } else {
         // Agent left or not yet joined
         setState((prev) => {
@@ -118,9 +155,7 @@ export default function AgentStatusCard({ deviceId }: Props) {
     channel.on('presence', { event: 'join' }, ({ newPresences }) => {
       const agentJoined = newPresences.some(isAgentPresence)
       if (agentJoined) {
-        clearConnectingTimeout()
-        // Ask agent for its current state
-        channel.send({ type: 'broadcast', event: 'status_request', payload: {} })
+        handleAgentConnected(channel.presenceState())
       }
     })
 
@@ -147,8 +182,7 @@ export default function AgentStatusCard({ deviceId }: Props) {
           .flat()
           .some(isAgentPresence)
         if (agentPresent) {
-          clearConnectingTimeout()
-          channel.send({ type: 'broadcast', event: 'status_request', payload: {} })
+          handleAgentConnected(presenceState)
         }
       } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
         clearConnectingTimeout()
@@ -179,16 +213,38 @@ export default function AgentStatusCard({ deviceId }: Props) {
   if (state === 'unavailable') {
     return (
       <div className="border border-neutral-200 rounded-xl p-5 mb-6">
-        <div className="flex items-center gap-2 mb-1">
+        <div className="flex items-center gap-2 mb-3">
           <span className={`w-2 h-2 rounded-full inline-block ${dotColor}`} />
           <p className="text-sm font-medium text-neutral-500">{label}</p>
         </div>
-        <p className="text-xs text-neutral-400">
-          Open the BuildHarvey desktop app to start recording.{' '}
-          <a href="/download" className="underline hover:text-neutral-600">
-            Download
-          </a>
+        <p className="text-sm text-neutral-600 mb-3">
+          BuildHarvey is installed but needs to reconnect.
         </p>
+        <div className="flex flex-col gap-2">
+          <button
+            onClick={() => { window.location.href = 'buildharvey://open' }}
+            className="text-sm font-medium bg-neutral-900 text-white px-4 py-2 rounded
+                       hover:bg-neutral-700 transition-colors"
+          >
+            Open BuildHarvey
+          </button>
+          <DownloadButton label="Download Latest" />
+        </div>
+      </div>
+    )
+  }
+
+  if (state === 'update_required') {
+    return (
+      <div className="border border-neutral-200 rounded-xl p-5 mb-6">
+        <div className="flex items-center gap-2 mb-3">
+          <span className={`w-2 h-2 rounded-full inline-block ${dotColor}`} />
+          <p className="text-sm font-medium text-neutral-700">{label}</p>
+        </div>
+        <p className="text-sm text-neutral-600 mb-3">
+          A newer version of BuildHarvey is required.
+        </p>
+        <DownloadButton label="Download Update" />
       </div>
     )
   }

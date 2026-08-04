@@ -57,3 +57,10 @@ SCREENSHOT_MIN_INTERVAL = 60.0
 # Development: set BUILDHARVEY_BASE_URL=http://localhost:3000 in agent/.env
 # Production app bundle uses the hardcoded default.
 BASE_URL = os.environ.get("BUILDHARVEY_BASE_URL", "https://buildharvey.com")
+
+# ── Version ───────────────────────────────────────────────────────────────────
+# _version.py is generated at build time by the CI workflow (not checked in).
+try:
+    from _version import __version__ as APP_VERSION
+except ImportError:
+    APP_VERSION = 'unknown'

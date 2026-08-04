@@ -49,6 +49,7 @@ agent/build/
 agent/dist/
 agent/Output/
 agent/*.spec
+agent/_version.py
 *.dmg
 *.exe
 *.zip

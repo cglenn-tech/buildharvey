@@ -37,6 +37,14 @@ def store_credential(raw_token_hex: str) -> None:
     _adapter.store_credential(raw_token_hex, account='device-token')
 
 
+def delete_credential() -> None:
+    """Remove device token from platform credential store. Forces re-activation on next launch."""
+    try:
+        _adapter.delete_credential(account='device-token')
+    except Exception:
+        pass  # already absent or unsupported — not an error
+
+
 def read_user_id() -> Optional[str]:
     """Read the stored user_id (UUID) associated with this device."""
     return _adapter.read_credential(account='user-id')

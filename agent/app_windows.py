@@ -186,4 +186,21 @@ if __name__ == '__main__':
     if args.self_test:
         sys.exit(run_self_test())
 
+    # ── Handle buildharvey:// protocol URLs ──────────────────────────────────
+    # When launched via the URL scheme (e.g. buildharvey://reconnect), the URL
+    # is passed as a positional argument by the Windows shell handler.
+    _proto_url = None
+    for _arg in sys.argv[1:]:
+        if _arg.startswith('buildharvey://'):
+            _proto_url = _arg
+            break
+
+    if _proto_url:
+        from urllib.parse import urlparse as _urlparse
+        _parsed = _urlparse(_proto_url)
+        if _parsed.netloc == 'reconnect':
+            # Force re-activation on next launch by clearing stored credential
+            auth.delete_credential()
+        # buildharvey://open and any other paths fall through to normal launch
+
     WindowsApp().run()

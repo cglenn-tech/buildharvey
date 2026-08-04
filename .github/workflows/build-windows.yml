@@ -128,44 +128,17 @@ jobs:
         working-directory: agent
         shell: pwsh
         run: |
-          Write-Host "Scanning agent source for leaked credentials..."
-          $findings = @()
-
-          # Verify anthropic is not installed.
-          # pip show exits with code 1 when the package is absent — reset $LASTEXITCODE
-          # immediately so it cannot leak out of this block as the step exit code.
-          $anthropicOut = .\.venv\Scripts\pip show anthropic 2>&1
-          $pipExit = $LASTEXITCODE
-          $LASTEXITCODE = 0   # reset before any further checks
-          if ($pipExit -eq 0 -and $anthropicOut -notmatch "not found") {
-            $findings += "anthropic package is installed in venv (should have been removed)"
+          Write-Host "Running secret audit via scripts/audit_package_secrets.py..."
+          .\.venv\Scripts\python.exe scripts/audit_package_secrets.py .
+          $auditExit = $LASTEXITCODE
+          $global:LASTEXITCODE = 0   # reset immediately — let explicit throw control the step outcome
+          if ($auditExit -eq 1) {
+            throw "Secret audit failed: credential(s) found in agent source — build aborted"
           }
-
-          # Scan .py files for hardcoded API key patterns.
-          # Use [regex]::IsMatch() instead of -match so no $LASTEXITCODE side-effects.
-          $keyPatterns = @(
-            'sk-ant-api0[3-9]-[A-Za-z0-9]',
-            'ANTHROPIC_API_KEY\s*=\s*[''"]sk-',
-            'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.'
-          )
-          Get-ChildItem -Filter "*.py" | ForEach-Object {
-            $content = Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue
-            if ($content) {
-              foreach ($pattern in $keyPatterns) {
-                if ([regex]::IsMatch($content, $pattern)) {
-                  $findings += "Potential credential in $($_.Name): matched $pattern"
-                }
-              }
-            }
+          if ($auditExit -eq 2) {
+            throw "Secret audit could not run — build aborted"
           }
-
-          if ($findings.Count -gt 0) {
-            Write-Host "SECRET AUDIT FAILURES:"
-            $findings | ForEach-Object { Write-Host "  - $_" }
-            throw "Secret audit failed: $($findings.Count) finding(s) — build aborted"
-          }
-          Write-Host "Secret audit: CLEAN"
-          exit 0
+          Write-Host "Secret audit passed."
 
       # ── Tesseract OCR (via Chocolatey — avoids brittle direct-download URLs) ──
       - name: Install Tesseract ${{ env.TESSERACT_VERSION }} via Chocolatey (with retry)
@@ -363,6 +336,15 @@ jobs:
             throw "Version format invalid: $ver"
           }
           Write-Host "Version format consistent: $ver"
+
+      # ── Embed version constant ────────────────────────────────────────────────
+      - name: Generate _version.py
+        working-directory: agent
+        shell: pwsh
+        run: |
+          $ver = "$env:BUILD_VERSION"
+          "__version__ = '$ver'" | Set-Content _version.py -Encoding utf8
+          Write-Host "Generated _version.py: __version__ = '$ver'"
 
       # ── PyInstaller ───────────────────────────────────────────────────────────
       - name: Build with PyInstaller

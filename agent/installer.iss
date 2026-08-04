@@ -11,6 +11,7 @@
 #endif
 
 [Setup]
+AppId={{A3F2C891-7D4E-4B1A-9F3C-2E8D6A5B0C74}
 AppName=BuildHarvey
 AppVersion={#MyAppVersion}
 AppPublisher=BuildHarvey
@@ -42,6 +43,13 @@ Filename: "{app}\BuildHarvey.exe"; Description: "Launch BuildHarvey"; Flags: now
 [UninstallRun]
 ; Attempt graceful quit before uninstall
 Filename: "{app}\BuildHarvey.exe"; Parameters: "--quit"; Flags: skipifdoesntexist runhidden
+
+[Registry]
+; Register buildharvey:// URL protocol (user-level, no admin required)
+Root: HKA; Subkey: "Software\Classes\buildharvey";                                   ValueType: string; ValueData: "URL:BuildHarvey Protocol"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\buildharvey";                                   ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\buildharvey\DefaultIcon";                       ValueType: string; ValueData: "{app}\BuildHarvey.exe,0"
+Root: HKA; Subkey: "Software\Classes\buildharvey\shell\open\command";                ValueType: string; ValueData: """{app}\BuildHarvey.exe"" ""%1"""
 
 [Code]
 // User data at ~/.buildharvey/ is preserved by default on reinstall and uninstall.

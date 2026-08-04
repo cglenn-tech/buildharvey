@@ -45,3 +45,10 @@ agent/.venv/
 agent/__pycache__/
 agent/**/__pycache__/
 agent/*.pyc
+agent/build/
+agent/dist/
+agent/Output/
+agent/*.spec
+*.dmg
+*.exe
+*.zip

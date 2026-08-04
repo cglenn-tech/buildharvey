@@ -444,7 +444,8 @@ jobs:
           $installer = Resolve-Path "Output\BuildHarveySetup-$ver.exe"
 
           Write-Host "Running silent install: $installer"
-          $proc = Start-Process -FilePath $installer -ArgumentList "/S" `
+          $proc = Start-Process -FilePath $installer `
+            -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-" `
             -Wait -PassThru -WindowStyle Hidden
           if ($proc.ExitCode -ne 0) { throw "Silent install failed (exit code $($proc.ExitCode))" }
 
@@ -480,7 +481,8 @@ jobs:
           $installDir = Split-Path $installed -Parent
           $uninstaller = Join-Path $installDir "unins000.exe"
           if (!(Test-Path $uninstaller)) { throw "Uninstaller not found at $uninstaller" }
-          $proc3 = Start-Process -FilePath $uninstaller -ArgumentList "/S" `
+          $proc3 = Start-Process -FilePath $uninstaller `
+            -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" `
             -Wait -PassThru -WindowStyle Hidden
           if ($proc3.ExitCode -ne 0) { throw "Uninstall failed (exit code $($proc3.ExitCode))" }
           if (Test-Path $installed) { throw "BuildHarvey.exe still present after uninstall" }

@@ -131,23 +131,30 @@ jobs:
           Write-Host "Scanning agent source for leaked credentials..."
           $findings = @()
 
-          # Verify anthropic is not installed
+          # Verify anthropic is not installed.
+          # pip show exits with code 1 when the package is absent — reset $LASTEXITCODE
+          # immediately so it cannot leak out of this block as the step exit code.
           $anthropicOut = .\.venv\Scripts\pip show anthropic 2>&1
-          if ($LASTEXITCODE -eq 0 -and $anthropicOut -notmatch "not found") {
+          $pipExit = $LASTEXITCODE
+          $LASTEXITCODE = 0   # reset before any further checks
+          if ($pipExit -eq 0 -and $anthropicOut -notmatch "not found") {
             $findings += "anthropic package is installed in venv (should have been removed)"
           }
 
-          # Scan .py files for hardcoded API key patterns
+          # Scan .py files for hardcoded API key patterns.
+          # Use [regex]::IsMatch() instead of -match so no $LASTEXITCODE side-effects.
           $keyPatterns = @(
             'sk-ant-api0[3-9]-[A-Za-z0-9]',
             'ANTHROPIC_API_KEY\s*=\s*[''"]sk-',
-            'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.'  # Supabase service role JWT
+            'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.'
           )
           Get-ChildItem -Filter "*.py" | ForEach-Object {
             $content = Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue
-            foreach ($pattern in $keyPatterns) {
-              if ($content -match $pattern) {
-                $findings += "Potential credential in $($_.Name): matched $pattern"
+            if ($content) {
+              foreach ($pattern in $keyPatterns) {
+                if ([regex]::IsMatch($content, $pattern)) {
+                  $findings += "Potential credential in $($_.Name): matched $pattern"
+                }
               }
             }
           }
@@ -158,6 +165,7 @@ jobs:
             throw "Secret audit failed: $($findings.Count) finding(s) — build aborted"
           }
           Write-Host "Secret audit: CLEAN"
+          exit 0
 
       # ── Tesseract OCR (via Chocolatey — avoids brittle direct-download URLs) ──
       - name: Install Tesseract ${{ env.TESSERACT_VERSION }} via Chocolatey (with retry)

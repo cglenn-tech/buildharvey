@@ -24,6 +24,14 @@ pyinstaller --clean --name BuildHarvey --windowed \
   --osx-bundle-identifier com.buildharvey.agent \
   app.py
 
+# ── Inject URL scheme into Info.plist ────────────────────────────────────────
+# Registers buildharvey:// so the website can deep-link into the running app.
+echo "==> Injecting buildharvey:// URL scheme into Info.plist"
+INFOPLIST="dist/BuildHarvey.app/Contents/Info.plist"
+plutil -insert CFBundleURLTypes \
+  -json '[{"CFBundleURLName":"BuildHarvey Protocol","CFBundleURLSchemes":["buildharvey"]}]' \
+  "$INFOPLIST"
+
 # ── Code signing ─────────────────────────────────────────────────────────────
 
 if [ -n "$IDENTITY" ]; then

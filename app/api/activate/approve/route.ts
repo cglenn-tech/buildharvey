@@ -43,20 +43,32 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: 'Activation not found or already used' }, { status: 404 })
   }
 
-  // Create the device
-  const { data: device, error: deviceError } = await admin
-    .from('devices')
-    .insert({
+  const installationId = activation.installation_id ?? null
+
+  let device: { id: string }
+  if (installationId) {
+    // UPSERT: reconnecting the same installation gets the same row
+    const { data, error } = await admin.from('devices').upsert({
       user_id: user.id,
-      name: activation.device_name ?? 'My Mac',
+      installation_id: installationId,
+      name: activation.device_name ?? 'My Device',
       platform: activation.platform,
       token_hash: activation.token_hash,
-    })
-    .select('id')
-    .single()
-
-  if (deviceError || !device) {
-    return Response.json({ error: 'Failed to register device' }, { status: 500 })
+      revoked_at: null,           // clear revocation on reconnect
+      activated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,installation_id' }).select('id').single()
+    if (error || !data) return Response.json({ error: 'Failed to register device' }, { status: 500 })
+    device = data
+  } else {
+    // Legacy: no installation_id → plain INSERT (old clients)
+    const { data, error } = await admin.from('devices').insert({
+      user_id: user.id,
+      name: activation.device_name ?? 'My Device',
+      platform: activation.platform,
+      token_hash: activation.token_hash,
+    }).select('id').single()
+    if (error || !data) return Response.json({ error: 'Failed to register device' }, { status: 500 })
+    device = data
   }
 
   // Mark activation as approved

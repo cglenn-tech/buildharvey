@@ -1,5 +1,6 @@
-import { createHash, createHmac } from 'crypto'
+import { createHmac } from 'crypto'
 import { getAdminClient } from '@/lib/supabase-admin'
+import { getDeviceFromToken } from '@/lib/device-auth'
 
 function signSupabaseJwt(userId: string, secret: string, expiresInSeconds: number): string {
   const now = Math.floor(Date.now() / 1000)
@@ -15,20 +16,6 @@ function signSupabaseJwt(userId: string, secret: string, expiresInSeconds: numbe
   return `${header}.${payload}.${sig}`
 }
 
-async function getDeviceFromToken(authHeader: string | null) {
-  if (!authHeader?.startsWith('Bearer ')) return null
-  const rawToken = authHeader.slice(7)
-  const tokenHash = createHash('sha256').update(rawToken).digest('hex')
-  const admin = getAdminClient()
-  const { data: device } = await admin
-    .from('devices')
-    .select('id, user_id')
-    .eq('token_hash', tokenHash)
-    .is('revoked_at', null)
-    .single()
-  return device ?? null
-}
-
 export async function GET(request: Request) {
   const device = await getDeviceFromToken(request.headers.get('authorization'))
   if (!device) {
@@ -40,6 +27,12 @@ export async function GET(request: Request) {
     return Response.json({ error: 'Server misconfiguration' }, { status: 500 })
   }
 
+  // Fire-and-forget last_seen_at update — don't block token response
+  getAdminClient()
+    .from('devices')
+    .update({ last_seen_at: new Date().toISOString() })
+    .eq('id', device.id)
+
   const expiresIn = 86400 // 24 hours
   const accessToken = signSupabaseJwt(device.user_id, jwtSecret, expiresIn)
 
@@ -48,6 +41,7 @@ export async function GET(request: Request) {
     anon_key: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
     access_token: accessToken,
     device_id: device.id,
+    installation_id: device.installation_id,
     expires_in: expiresIn,
   })
 }

@@ -31,6 +31,7 @@ Grace period:
 """
 import asyncio
 import json
+import sys
 import threading
 import time
 import traceback
@@ -355,8 +356,42 @@ async def _connect_once() -> None:
     await channel.subscribe(on_subscribe)
     await asyncio.wait_for(subscribe_done.wait(), timeout=10)
 
-    await channel.track({'type': 'agent', 'state': _current_state, 'version': config.APP_VERSION})
+    await channel.track({
+        'type': 'agent',
+        'state': _current_state,
+        'version': config.APP_VERSION,
+        'platform': sys.platform,
+        'last_seen_at': time.time(),
+    })
     print(f"[realtime] subscribed and tracking on {topic}")
+
+    # ── Periodic re-track and heartbeat tasks ─────────────────────────────────
+
+    async def _periodic_track():
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await channel.track({
+                    'type': 'agent',
+                    'state': _current_state,
+                    'version': config.APP_VERSION,
+                    'platform': sys.platform,
+                    'last_seen_at': time.time(),
+                })
+            except Exception:
+                pass
+
+    async def _heartbeat_loop():
+        loop = asyncio.get_event_loop()
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await loop.run_in_executor(None, _call_heartbeat)
+            except Exception:
+                pass
+
+    track_task = asyncio.ensure_future(_periodic_track())
+    heartbeat_task = asyncio.ensure_future(_heartbeat_loop())
 
     # ── Keep alive until token is near expiry ─────────────────────────────────
 
@@ -365,10 +400,30 @@ async def _connect_once() -> None:
     await asyncio.sleep(sleep_seconds)
 
     # Clean up before reconnect
+    track_task.cancel()
+    heartbeat_task.cancel()
     _channel = None
     _credentials = None  # force fresh token fetch on next connect
     try:
         await channel.unsubscribe()
         await client.disconnect()
+    except Exception:
+        pass
+
+
+def _call_heartbeat() -> None:
+    """Send heartbeat to /api/device/heartbeat (best-effort, sync)."""
+    token = auth.read_credential()
+    if not token:
+        return
+    url = f"{config.BASE_URL}/api/device/heartbeat"
+    req = urllib.request.Request(
+        url,
+        headers={'Authorization': f'Bearer {token}'},
+        method='GET',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
     except Exception:
         pass

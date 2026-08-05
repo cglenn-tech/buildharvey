@@ -48,7 +48,7 @@ class WindowsApp:
             import platform as _platform
             device_name = _platform.node() or 'My PC'
             print(f"[app] No credential — activating device '{device_name}'")
-            token = auth.activate(device_name=device_name)
+            token = auth.activate(device_name=device_name, platform='windows')
             if not token:
                 print("[app] Activation failed or timed out")
                 return
@@ -201,6 +201,9 @@ if __name__ == '__main__':
         if _parsed.netloc == 'reconnect':
             # Force re-activation on next launch by clearing stored credential
             auth.delete_credential()
+        elif _parsed.netloc == 'disconnect':
+            auth.disconnect()
+            sys.exit(0)
         # buildharvey://open and any other paths fall through to normal launch
 
     WindowsApp().run()

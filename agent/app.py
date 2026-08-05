@@ -21,10 +21,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import AppKit
+import Foundation
 import objc
 import auth
 import permissions
 import realtime_client
+
+# Apple Event constants for URL scheme handling
+_kInternetEventClass = 0x4755524C  # 'GURL'
+_kAEGetURL = 0x4755524C            # 'GURL'
 
 
 class AppDelegate(AppKit.NSObject):
@@ -37,6 +42,15 @@ class AppDelegate(AppKit.NSObject):
     def applicationDidFinishLaunching_(self, notification):
         # No Dock icon — pure menu-bar accessory
         AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+
+        # Register URL scheme handler for buildharvey:// deep links
+        em = AppKit.NSAppleEventManager.sharedAppleEventManager()
+        em.setEventHandler_andSelector_forEventClass_andEventID_(
+            self,
+            objc.selector(self.handleGetURL_withReplyEvent_, signature=b'v@:@@'),
+            _kInternetEventClass,
+            _kAEGetURL,
+        )
 
         self._stop_event = threading.Event()
 
@@ -60,6 +74,12 @@ class AppDelegate(AppKit.NSObject):
         )
         self._connect_item.setTarget_(self)
         menu.addItem_(self._connect_item)
+
+        disconnect_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Disconnect Account", "disconnectAccount:", ""
+        )
+        disconnect_item.setTarget_(self)
+        menu.addItem_(disconnect_item)
         menu.addItem_(AppKit.NSMenuItem.separatorItem())
 
         open_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -107,12 +127,25 @@ class AppDelegate(AppKit.NSObject):
         realtime_client.force_stop()
         self._stop_event.set()
 
+    def _get_display_name(self) -> str:
+        try:
+            import subprocess
+            r = subprocess.run(
+                ['scutil', '--get', 'ComputerName'],
+                capture_output=True, text=True, timeout=3,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except Exception:
+            pass
+        import platform
+        return platform.node() or 'My Mac'
+
     def _startup(self):
         """Run credential check, permission check, then start the agent."""
         # 1. Ensure credential
         if not auth.read_credential():
-            import platform as _platform
-            device_name = _platform.node() or 'My Mac'
+            device_name = self._get_display_name()
             AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
                 lambda: self._label_item.setTitle_("BuildHarvey: Connecting…")
             )
@@ -141,6 +174,30 @@ class AppDelegate(AppKit.NSObject):
         if auth.read_credential():
             return
         threading.Thread(target=self._startup, daemon=True).start()
+
+    def disconnectAccount_(self, sender):
+        """Revoke device on server and clear local credential."""
+        realtime_client.force_stop()
+        auth.disconnect()
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+            lambda: self._label_item.setTitle_("BuildHarvey: Disconnected")
+        )
+
+    def handleGetURL_withReplyEvent_(self, event, replyEvent):
+        """Handle buildharvey:// URL scheme events sent by macOS."""
+        url_desc = event.paramDescriptorForKeyword_(0x2d2d2d2d)  # keyDirectObject
+        if url_desc is None:
+            return
+        url_str = url_desc.stringValue()
+        if not url_str:
+            return
+        print(f"[app] URL event: {url_str}")
+        if url_str.startswith('buildharvey://disconnect'):
+            threading.Thread(target=self.disconnectAccount_, args=(None,), daemon=True).start()
+        elif url_str.startswith('buildharvey://reconnect'):
+            auth.delete_credential()
+            threading.Thread(target=self._startup, daemon=True).start()
+        # buildharvey://open — no action needed; macOS already foregrounded the app
 
     def _prompt_permissions(self):
         alert = AppKit.NSAlert.alloc().init()

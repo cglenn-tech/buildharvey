@@ -7,7 +7,7 @@ import DownloadButton from './DownloadButton'
 
 type CardState =
   | 'connecting'      // subscribed to channel, waiting for agent presence (≤5 s)
-  | 'unavailable'     // no agent in channel after 5 s, or channel error
+  | 'offline'         // no agent in channel after 5 s, or channel error
   | 'idle'            // agent present, not recording
   | 'recording'       // agent present, recording active
   | 'stopping'        // stop sent, waiting for agent confirmation
@@ -18,7 +18,7 @@ type CardState =
 
 const STATE_LABELS: Record<CardState, string> = {
   connecting:      'Connecting to desktop app…',
-  unavailable:     'Desktop app not connected',
+  offline:         'Desktop app not connected',
   idle:            'Ready to start',
   recording:       'Recording',
   stopping:        'Stopping',
@@ -30,7 +30,7 @@ const STATE_LABELS: Record<CardState, string> = {
 
 const DOT_COLORS: Record<CardState, string> = {
   connecting:      'bg-neutral-300',
-  unavailable:     'bg-neutral-300',
+  offline:         'bg-neutral-300',
   idle:            'bg-green-400',
   recording:       'bg-red-500 animate-pulse',
   stopping:        'bg-yellow-400',
@@ -95,7 +95,7 @@ export default function AgentStatusCard({ deviceId }: Props) {
 
     // ── 5-second timeout: if no agent appears, show unavailable ──────────────
     timeoutRef.current = setTimeout(() => {
-      setState((prev) => (prev === 'connecting' ? 'unavailable' : prev))
+      setState((prev) => (prev === 'connecting' ? 'offline' : prev))
     }, 5000)
 
     function clearConnectingTimeout() {
@@ -147,7 +147,7 @@ export default function AgentStatusCard({ deviceId }: Props) {
         // Agent left or not yet joined
         setState((prev) => {
           if (prev === 'connecting') return prev  // still waiting
-          return 'unavailable'
+          return 'offline'
         })
       }
     })
@@ -167,7 +167,7 @@ export default function AgentStatusCard({ deviceId }: Props) {
           .flat()
           .some(isAgentPresence)
         if (!agentStillPresent) {
-          setState('unavailable')
+          setState('offline')
         }
       }
     })
@@ -210,17 +210,11 @@ export default function AgentStatusCard({ deviceId }: Props) {
   const label = STATE_LABELS[state]
   const dotColor = DOT_COLORS[state]
 
-  if (state === 'unavailable') {
+  if (state === 'offline') {
     return (
       <div className="border border-neutral-200 rounded-xl p-5 mb-6">
-        <div className="flex items-center gap-2 mb-3">
-          <span className={`w-2 h-2 rounded-full inline-block ${dotColor}`} />
-          <p className="text-sm font-medium text-neutral-500">{label}</p>
-        </div>
-        <p className="text-sm text-neutral-600 mb-3">
-          BuildHarvey is installed but needs to reconnect.
-        </p>
-        <div className="flex flex-col gap-2">
+        <p className="text-sm font-medium text-neutral-500">Previously connected, but currently offline.</p>
+        <div className="flex flex-col gap-2 mt-3">
           <button
             onClick={() => { window.location.href = 'buildharvey://open' }}
             className="text-sm font-medium bg-neutral-900 text-white px-4 py-2 rounded

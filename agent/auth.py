@@ -21,6 +21,7 @@ from typing import Optional
 
 import config
 from os_adapters import Adapter as _Adapter
+from installation import get_installation_id
 
 _adapter = _Adapter()
 
@@ -85,9 +86,21 @@ def _api(path: str, body: dict) -> dict:
         return json.loads(resp.read())
 
 
+def _api_bearer(path: str, token: str, method: str = 'GET', body: Optional[dict] = None) -> dict:
+    """Authenticated request to the BuildHarvey API using Bearer device token."""
+    url = f"{config.BASE_URL}{path}"
+    data = json.dumps(body).encode() if body else None
+    headers: dict = {'Authorization': f'Bearer {token}'}
+    if data:
+        headers['Content-Type'] = 'application/json'
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read())
+
+
 # ── Activation flow ────────────────────────────────────────────────────────────
 
-def activate(device_name: str = 'My Mac') -> Optional[str]:
+def activate(device_name: str = 'My Mac', platform: str = 'macos') -> Optional[str]:
     """
     Run the device activation flow.
     Returns raw_device_token hex string on success, None on failure.
@@ -103,9 +116,10 @@ def activate(device_name: str = 'My Mac') -> Optional[str]:
     try:
         resp = _api('/api/activate/request', {
             'device_name': device_name,
-            'platform': 'macos',
+            'platform': platform,
             'token_hash': token_hash,
             'polling_verifier': polling_verifier,
+            'installation_id': get_installation_id(),
         })
     except Exception as exc:
         print(f"[auth] activate request failed: {exc}")
@@ -154,3 +168,19 @@ def activate(device_name: str = 'My Mac') -> Optional[str]:
 
     print("[auth] activation timed out")
     return None
+
+
+def disconnect() -> bool:
+    """Revoke device on server, then delete local credential. Preserves installation_id."""
+    token = read_credential()
+    if token:
+        try:
+            _api_bearer('/api/device/disconnect', token, method='POST')
+        except Exception as exc:
+            print(f"[auth] disconnect error: {exc}")
+    delete_credential()
+    try:
+        _adapter.delete_credential(account='device-id')
+    except Exception:
+        pass
+    return True

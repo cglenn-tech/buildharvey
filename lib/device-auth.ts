@@ -6,7 +6,9 @@ export type DeviceRecord = { id: string; user_id: string; installation_id: strin
 export async function getDeviceFromToken(authHeader: string | null): Promise<DeviceRecord | null> {
   if (!authHeader?.startsWith('Bearer ')) return null
   const rawToken = authHeader.slice(7)
-  const tokenHash = createHash('sha256').update(rawToken).digest('hex')
+  // Token is hex-encoded raw bytes; decode before hashing to match what Python
+  // stored: hashlib.sha256(raw_bytes).hexdigest()
+  const tokenHash = createHash('sha256').update(Buffer.from(rawToken, 'hex')).digest('hex')
   const admin = getAdminClient()
   const { data: device } = await admin
     .from('devices')

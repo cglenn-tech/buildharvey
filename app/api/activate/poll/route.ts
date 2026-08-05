@@ -37,8 +37,10 @@ export async function POST(request: NextRequest) {
     return Response.json({ status: 'expired' })
   }
 
-  // Constant-time compare: sha256(polling_secret) vs stored polling_verifier
-  const computed = createHash('sha256').update(polling_secret).digest('hex')
+  // Constant-time compare: sha256(raw_bytes) vs stored polling_verifier.
+  // polling_secret is hex-encoded raw bytes; decode before hashing to match
+  // what Python stored: hashlib.sha256(raw_bytes).hexdigest()
+  const computed = createHash('sha256').update(Buffer.from(polling_secret, 'hex')).digest('hex')
   let match = false
   try {
     match = timingSafeEqual(

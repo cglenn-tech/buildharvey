@@ -261,12 +261,11 @@ async def _connect_once() -> None:
         _credentials = creds
 
     supabase_url: str = creds['supabase_url']
-    anon_key: str = creds['anon_key']
     access_token: str = creds['access_token']
     device_id: str = creds['device_id']
     expires_at: float = creds['expires_at']
 
-    realtime_url = supabase_url.replace('https://', 'wss://') + '/realtime/v1/websocket'
+    realtime_url = supabase_url + '/realtime/v1'
     topic = f'buildharvey:device:{device_id}'
 
     print(f"[realtime] connecting — channel {topic[:40]}…")
@@ -274,7 +273,6 @@ async def _connect_once() -> None:
     client = AsyncRealtimeClient(
         realtime_url,
         access_token,
-        params={'apikey': anon_key},
     )
     await client.connect()
     print("[realtime] WebSocket open")

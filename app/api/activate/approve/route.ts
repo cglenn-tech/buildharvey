@@ -47,18 +47,48 @@ export async function POST(request: NextRequest) {
 
   let device: { id: string }
   if (installationId) {
-    // UPSERT: reconnecting the same installation gets the same row
-    const { data, error } = await admin.from('devices').upsert({
-      user_id: user.id,
-      installation_id: installationId,
-      name: activation.device_name ?? 'My Device',
-      platform: activation.platform,
-      token_hash: activation.token_hash,
-      revoked_at: null,           // clear revocation on reconnect
-      activated_at: new Date().toISOString(),
-    }, { onConflict: 'user_id,installation_id' }).select('id').single()
-    if (error || !data) return Response.json({ error: 'Failed to register device' }, { status: 500 })
-    device = data
+    // PostgREST upsert doesn't work with partial unique indexes (WHERE clause),
+    // so we do a manual select-then-update-or-insert instead.
+    const { data: existing } = await admin
+      .from('devices')
+      .select('id')
+      .eq('user_id', user.id)
+      .eq('installation_id', installationId)
+      .single()
+
+    if (existing) {
+      // Reconnect: update the existing row (clears revocation, refreshes token)
+      const { data, error } = await admin
+        .from('devices')
+        .update({
+          name: activation.device_name ?? 'My Device',
+          platform: activation.platform,
+          token_hash: activation.token_hash,
+          revoked_at: null,
+          activated_at: new Date().toISOString(),
+        })
+        .eq('id', existing.id)
+        .select('id')
+        .single()
+      if (error || !data) return Response.json({ error: 'Failed to register device' }, { status: 500 })
+      device = data
+    } else {
+      // First activation for this installation
+      const { data, error } = await admin
+        .from('devices')
+        .insert({
+          user_id: user.id,
+          installation_id: installationId,
+          name: activation.device_name ?? 'My Device',
+          platform: activation.platform,
+          token_hash: activation.token_hash,
+          activated_at: new Date().toISOString(),
+        })
+        .select('id')
+        .single()
+      if (error || !data) return Response.json({ error: 'Failed to register device' }, { status: 500 })
+      device = data
+    }
   } else {
     // Legacy: no installation_id → plain INSERT (old clients)
     const { data, error } = await admin.from('devices').insert({

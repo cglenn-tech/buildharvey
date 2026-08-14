@@ -2,6 +2,7 @@ mss
 Pillow
 numpy
 pyobjc-framework-Cocoa>=10.0
+pyobjc-framework-Security>=10.0
 pyobjc-framework-Vision
 pyobjc-framework-Quartz>=10.0
 python-dotenv

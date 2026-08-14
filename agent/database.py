@@ -254,12 +254,25 @@ def _keychain_read() -> Optional[str]:
                 return data.decode("utf-8")
         except Exception:
             pass
-        # Fallback: use keyring (cross-platform) if Security framework unavailable
+        # Fallback: use keyring if Security framework unavailable
         try:
             import keyring
             return keyring.get_password(_KEYCHAIN_SERVICE, _KEYCHAIN_ACCOUNT) or None
         except Exception:
-            return None
+            pass
+        # Final fallback: use the macOS `security` CLI (always available on macOS)
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["security", "find-generic-password",
+                 "-s", _KEYCHAIN_SERVICE, "-a", _KEYCHAIN_ACCOUNT, "-w"],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception:
+            pass
+        return None
     elif platform.system() == "Windows":
         try:
             import win32cred  # type: ignore[import]
@@ -294,6 +307,20 @@ def _keychain_write(key: str) -> None:
         try:
             import keyring
             keyring.set_password(_KEYCHAIN_SERVICE, _KEYCHAIN_ACCOUNT, key)
+            return
+        except Exception:
+            pass
+        # Final fallback: use the macOS `security` CLI (always available on macOS)
+        # -U updates an existing entry rather than failing if it already exists.
+        try:
+            import subprocess
+            subprocess.run(
+                ["security", "add-generic-password",
+                 "-s", _KEYCHAIN_SERVICE, "-a", _KEYCHAIN_ACCOUNT,
+                 "-w", key, "-U"],
+                check=True, capture_output=True,
+            )
+            return
         except Exception:
             pass
     elif platform.system() == "Windows":
@@ -330,6 +357,17 @@ def _delete_keychain_key() -> None:
         try:
             import keyring
             keyring.delete_password(_KEYCHAIN_SERVICE, _KEYCHAIN_ACCOUNT)
+            return
+        except Exception:
+            pass
+        # Final fallback: use the macOS `security` CLI
+        try:
+            import subprocess
+            subprocess.run(
+                ["security", "delete-generic-password",
+                 "-s", _KEYCHAIN_SERVICE, "-a", _KEYCHAIN_ACCOUNT],
+                capture_output=True,
+            )
         except Exception:
             pass
     elif platform.system() == "Windows":

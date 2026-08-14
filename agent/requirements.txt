@@ -7,3 +7,4 @@ pyobjc-framework-Quartz>=10.0
 python-dotenv
 websockets
 realtime>=2.0.0
+apsw-sqlite3mc>=3.43.0.0

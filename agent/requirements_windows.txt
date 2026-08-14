@@ -20,7 +20,9 @@ keyring
 # Windows screen context
 pywin32
 psutil
-pywinauto
+
+# SQLite encryption (required in PRIVATE_MODE)
+apsw-sqlite3mc>=3.43.0.0
 
 # Windows OCR (pytesseract + bundled Tesseract binary — see build_windows.spec)
 pytesseract

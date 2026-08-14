@@ -96,7 +96,7 @@ class AppDelegate(AppKit.NSObject):
 
         self._status_item.setMenu_(menu)
 
-        # ── Sleep / session-resign notifications ──────────────────────────────
+        # ── Sleep / session-resign / screen-lock notifications ────────────────
         nc = AppKit.NSWorkspace.sharedWorkspace().notificationCenter()
         nc.addObserver_selector_name_object_(
             self,
@@ -110,6 +110,13 @@ class AppDelegate(AppKit.NSObject):
             AppKit.NSWorkspaceSessionDidResignActiveNotification,
             None,
         )
+        # Screen lock (separate from sleep): NSWorkspaceScreensDidSleepNotification
+        nc.addObserver_selector_name_object_(
+            self,
+            objc.selector(self.workspaceScreenLocked_, signature=b'v@:@'),
+            AppKit.NSWorkspaceScreensDidSleepNotification,
+            None,
+        )
 
         # ── Credential and permission check, then start ────────────────────────
         threading.Thread(target=self._startup, daemon=True).start()
@@ -118,9 +125,37 @@ class AppDelegate(AppKit.NSObject):
         webbrowser.open("https://buildharvey.com")
 
     def workspaceSleep_(self, notification):
-        self._emergency_stop()
+        self._on_security_boundary("device_locked")
 
     def workspaceSessionResign_(self, notification):
+        self._on_security_boundary("user_logged_out")
+
+    def workspaceScreenLocked_(self, notification):
+        self._on_security_boundary("device_locked")
+
+    def _on_security_boundary(self, reason: str) -> None:
+        """
+        Called at every security boundary crossing (sleep, lock, logout).
+        Phase 1: invalidates all capture leases so re-consent is required on resume.
+        Always stops the agent loop.
+        """
+        import config
+        if config.ENABLE_CAPTURE_LEASES:
+            # Notify the agent loop to invalidate leases via the shared event;
+            # ConsentManager.invalidate_all() is called inside the agent loop
+            # on next wake via the session epoch stored in SQLite.
+            # We also set a flag so the next startup knows to show batch re-consent.
+            try:
+                import database
+                conn = database.connect()
+                conn.execute(
+                    "INSERT INTO session_state (key, value) VALUES ('boundary_reason', ?)"
+                    " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (reason,),
+                )
+                conn.commit()
+            except Exception:
+                pass
         self._emergency_stop()
 
     def _emergency_stop(self):

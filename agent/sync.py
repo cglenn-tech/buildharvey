@@ -18,14 +18,20 @@ from pathlib import Path
 import auth
 import config
 import database
+from bh_logging import get_logger
+
+log = get_logger("sync")
 
 _queue: queue.Queue = queue.Queue()
 
 
 def start() -> None:
+    if config.PRIVATE_MODE:
+        log.info("sync.disabled", reason="private_mode")
+        return
     t = threading.Thread(target=_worker, name="sync-worker", daemon=True)
     t.start()
-    print("[sync] worker started")
+    log.info("sync.started")
 
 
 def enqueue_episode(episode_dict: dict) -> None:
@@ -43,7 +49,7 @@ def _worker() -> None:
     conn = database.connect()
     token = auth.read_credential()
     if not token:
-        print("[sync] no device credential — running offline")
+        log.warning("sync.no_credential")
     while True:
         task = _queue.get()
         try:
@@ -85,6 +91,8 @@ def _get(path: str, token: str) -> dict:
 
 
 def _upsert(token: str | None, episode_dict: dict, conn: sqlite3.Connection) -> None:
+    if config.PRIVATE_MODE:
+        return
     if not token:
         return
     episode_id = episode_dict["id"]
@@ -94,13 +102,13 @@ def _upsert(token: str | None, episode_dict: dict, conn: sqlite3.Connection) -> 
         try:
             _post('/api/episodes/sync', episode_dict, token)
             database.mark_synced(conn, episode_id)
-            print(f"[sync] synced {episode_id[:8]}… '{episode_dict['case_name']}'")
+            log.info("sync.episode_synced", episode_id=episode_id[:8])
             break
         except Exception as exc:
-            print(f"[sync] attempt {attempt + 1} failed: {exc}")
+            log.warning("sync.attempt_failed", attempt=attempt + 1, error=str(exc))
             _time.sleep(2 ** attempt)
     else:
-        print(f"[sync] gave up on {episode_id[:8]} — will retry on restart")
+        log.error("sync.gave_up", episode_id=episode_id[:8])
         return  # Don't upload screenshots if episode sync failed
 
     # Upload evidence screenshots after successful episode sync
@@ -110,10 +118,12 @@ def _upsert(token: str | None, episode_dict: dict, conn: sqlite3.Connection) -> 
 
 def _upload_screenshots(token: str, episode_id: str, paths: list[str]) -> None:
     """Upload each evidence screenshot using signed upload URLs."""
+    if config.PRIVATE_MODE:
+        return
     for path in paths:
         p = Path(path)
         if not p.exists():
-            print(f"[sync] screenshot missing, skipping: {path}")
+            log.warning("sync.screenshot_missing", path=path)
             continue
 
         filename = p.name
@@ -144,24 +154,26 @@ def _upload_screenshots(token: str, episode_id: str, paths: list[str]) -> None:
                     'path': storage_path,
                 }, token)
 
-                print(f"[sync] uploaded screenshot {filename} for {episode_id[:8]}")
+                log.info("sync.screenshot_uploaded", filename=filename, episode_id=episode_id[:8])
                 break
             except urllib.error.HTTPError as exc:
                 if exc.code == 409:
                     # Already uploaded — idempotent
                     break
-                print(f"[sync] screenshot upload attempt {attempt + 1} failed: {exc}")
+                log.warning("sync.screenshot_upload_failed", attempt=attempt + 1, error=str(exc))
                 _time.sleep(2 ** attempt)
             except Exception as exc:
-                print(f"[sync] screenshot upload attempt {attempt + 1} failed: {exc}")
+                log.warning("sync.screenshot_upload_failed", attempt=attempt + 1, error=str(exc))
                 _time.sleep(2 ** attempt)
 
 
 def _cleanup(token: str | None, invalid_ids: list[str]) -> None:
+    if config.PRIVATE_MODE:
+        return
     if not token or not invalid_ids:
         return
     try:
         _post('/api/episodes/invalidate', {"ids": invalid_ids}, token)
-        print(f"[sync] marked {len(invalid_ids)} invalid episode(s)")
+        log.info("sync.invalidated", count=len(invalid_ids))
     except Exception as exc:
-        print(f"[sync] cleanup failed: {exc}")
+        log.error("sync.cleanup_failed", error=str(exc))

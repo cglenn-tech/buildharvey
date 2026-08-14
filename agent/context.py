@@ -1,9 +1,17 @@
 """
 Active application context: app name, window title, browser URL, file path.
 All values fall back to empty string on any error.
+
+get_metadata_context() — returns app_name, bundle_id, and window_title only,
+via Quartz (no pixels, no AppleScript). Safe to call before consent check.
+
+get_context() — additionally calls AppleScript for browser URL / file path when
+ENABLE_APPLESCRIPT_METADATA=true. Gated so scripts never run when flag is false.
 """
 import subprocess
 from dataclasses import dataclass
+
+import config
 
 
 @dataclass
@@ -33,11 +41,29 @@ _DOCUMENT_SCRIPTS: dict[str, str] = {
 }
 
 
+def get_metadata_context() -> ScreenContext:
+    """
+    Return app_name, bundle_id, and window_title only — no AppleScript calls,
+    no pixel capture. Safe to call before the consent check.
+    """
+    app_name, bundle_id = _get_active_app()
+    window_title = _get_window_title()
+    return ScreenContext(
+        app_name=app_name,
+        bundle_id=bundle_id,
+        window_title=window_title,
+        browser_url="",
+        file_path="",
+    )
+
+
 def get_context() -> ScreenContext:
     app_name, bundle_id = _get_active_app()
     window_title = _get_window_title()
-    browser_url = _get_browser_url(bundle_id)
-    file_path = _get_file_path(bundle_id)
+    # Gate AppleScript calls — scripts must not run when flag is false because
+    # even a no-op osascript call can trigger macOS Automation permission dialogs.
+    browser_url = _get_browser_url(bundle_id) if config.ENABLE_APPLESCRIPT_METADATA else ""
+    file_path = _get_file_path(bundle_id) if config.ENABLE_APPLESCRIPT_METADATA else ""
 
     return ScreenContext(
         app_name=app_name,

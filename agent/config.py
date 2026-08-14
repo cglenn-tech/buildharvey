@@ -1,6 +1,14 @@
 import os
 from pathlib import Path
 
+# ── Build-time production lock ────────────────────────────────────────────────
+# When PRODUCTION_BUILD=True (set by build pipeline), privacy flags are forced
+# to their production values and cannot be weakened at runtime.
+try:
+    from _build_config import PRODUCTION_BUILD
+except ImportError:
+    PRODUCTION_BUILD = False
+
 # ── Directories ───────────────────────────────────────────────────────────────
 BASE_DIR = Path.home() / ".buildharvey"
 DB_PATH = BASE_DIR / "buildharvey.db"
@@ -64,3 +72,57 @@ try:
     from _version import __version__ as APP_VERSION
 except ImportError:
     APP_VERSION = 'unknown'
+
+# ── Privacy mode (master switch) ─────────────────────────────────────────────
+# PRIVATE_MODE=true is the production default. CI and development set it to
+# false explicitly to allow cloud paths and disable encryption.
+# When true: capture leases required, local inference required, SQLite encrypted,
+# sync disabled, cloud vision/finalizer fallback disabled.
+#
+# PRODUCTION_BUILD=True: env var override is ignored — PRIVATE_MODE is always True.
+if PRODUCTION_BUILD:
+    PRIVATE_MODE = True
+else:
+    PRIVATE_MODE = os.environ.get("BUILDHARVEY_PRIVATE_MODE", "true").lower() == "true"
+
+# ── Privacy / Capture Lease Model (Phase 1) ───────────────────────────────────
+# Per-window consent before any observation is recorded.
+# Default TRUE in Private Mode (production). Override with ENABLE_CAPTURE_LEASES=false
+# in development/CI.
+# PRODUCTION_BUILD: always True, cannot be weakened.
+if PRODUCTION_BUILD:
+    ENABLE_CAPTURE_LEASES = True
+else:
+    _capture_leases_default = "true" if PRIVATE_MODE else "false"
+    ENABLE_CAPTURE_LEASES = os.environ.get("ENABLE_CAPTURE_LEASES", _capture_leases_default).lower() == "true"
+
+# Individual consent dialog timeout (seconds). Privacy fails closed on timeout.
+CONSENT_DIALOG_TIMEOUT_SECONDS = int(os.environ.get("CONSENT_DIALOG_TIMEOUT_SECONDS", "30"))
+
+# Batch re-consent UI timeout after device unlock (seconds). Fails closed on timeout.
+BATCH_RECONSENT_TIMEOUT_SECONDS = int(os.environ.get("BATCH_RECONSENT_TIMEOUT_SECONDS", "120"))
+
+# ── Privacy / AppleScript metadata (Phase 2) ─────────────────────────────────
+# Set TRUE to enable AppleScript browser URL and document path extraction.
+# Requires Automation permissions for each targeted app.
+# Default FALSE (opt-in regardless of PRIVATE_MODE — Automation dialogs are
+# never shown without explicit user opt-in).
+ENABLE_APPLESCRIPT_METADATA = os.environ.get("ENABLE_APPLESCRIPT_METADATA", "false").lower() == "true"
+
+# ── Privacy / Screenshot retention ────────────────────────────────────────────
+# At startup, delete temp frames older than this many hours (crash safety net).
+SCREENSHOT_RETENTION_HOURS = int(os.environ.get("SCREENSHOT_RETENTION_HOURS", "1"))
+
+# ── Privacy / Local Inference (Phase 3+) ─────────────────────────────────────
+# Use on-device model for episode boundary classification and summarization.
+# Default TRUE in Private Mode (production). Override with USE_LOCAL_INFERENCE=false
+# in development/CI.
+# PRODUCTION_BUILD: always True, cannot be weakened.
+if PRODUCTION_BUILD:
+    USE_LOCAL_INFERENCE = True
+else:
+    _local_inference_default = "true" if PRIVATE_MODE else "false"
+    USE_LOCAL_INFERENCE = os.environ.get("USE_LOCAL_INFERENCE", _local_inference_default).lower() == "true"
+
+# Local model storage directory (never bundled in installer — downloaded on first run).
+LOCAL_MODELS_DIR = Path.home() / "Library" / "Application Support" / "BuildHarvey" / "models"

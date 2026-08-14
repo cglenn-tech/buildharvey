@@ -18,8 +18,11 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 import config
+from bh_logging import get_logger
 from episode import Episode, ScreenshotEvidence, new_episode
 from observer import Observation
+
+log = get_logger("engine")
 
 
 @dataclass
@@ -152,10 +155,7 @@ class EpisodeEngine:
         # Pause after 5 min idle (episode stays open)
         if idle > config.INACTIVITY_PAUSE_SECONDS and not self.active._is_paused:
             self.active.pause_timing()
-            print(
-                f"[engine] timing paused: '{self.active.case_name}' "
-                f"[idle {idle:.0f}s]"
-            )
+            log.info("engine.timing_paused", episode=self.active.case_name, idle_s=round(idle))
 
         return None
 
@@ -166,6 +166,48 @@ class EpisodeEngine:
         if not self.active:
             return None
         return self._force_close(reason="user stop")
+
+    def check_deterministic_boundary(
+        self, obs: Observation, current: Optional[Episode]
+    ) -> Optional[bool]:
+        """
+        Check for deterministic episode boundary signals that don't require a
+        model call.
+
+        Returns:
+          True  — new episode should be opened (definitive boundary detected)
+          False — continue current episode (same app/matter, no boundary)
+          None  — ambiguous; caller should invoke local model for classification
+
+        Deterministic boundary signals (True):
+          - App bundle_id changed to a different application
+          - Known document-name pattern changed significantly in window title
+
+        Definitive continue signals (False):
+          - Same app and same window title (no content shift)
+
+        Ambiguous (None — invoke model):
+          - Same app but window title shifted to unknown content
+        """
+        if not current:
+            # No active episode — ambiguous (model decides whether to open one)
+            return None
+
+        current_app = self._current_app
+        current_window = self._current_window
+        new_app = obs.app or ""
+        new_window = obs.window_title or ""
+
+        # App changed → definitive boundary
+        if current_app and new_app and current_app != new_app:
+            return True
+
+        # Same app, same window title → definitely continue
+        if new_app == current_app and new_window == current_window:
+            return False
+
+        # Same app, window title changed → ambiguous
+        return None
 
     # ── Private helpers ────────────────────────────────────────────────────────
 
@@ -184,7 +226,7 @@ class EpisodeEngine:
         self._state = "active"
         self._consecutive_new_episode = 0
         self._candidate_name = ""
-        print(f"[engine] episode opened: {ep.case_name}")
+        log.info("engine.episode_opened", episode=ep.case_name)
         return EngineResult(active_episode=ep)
 
     def _continue_episode(self, evidence: ScreenshotEvidence) -> EngineResult:
@@ -196,7 +238,7 @@ class EpisodeEngine:
         # Resume timing if we were paused
         if ep._is_paused:
             ep.resume_timing()
-            print(f"[engine] timing resumed: {ep.case_name}")
+            log.info("engine.timing_resumed", episode=ep.case_name)
 
         # Allow Claude to refine the name toward something more specific
         if (
@@ -207,11 +249,11 @@ class EpisodeEngine:
             old_name = ep.case_name
             ep.case_name = evidence.suggested_episode_name
             ep._objective = evidence.objective
-            print(f"[engine] episode name updated: '{old_name}' → '{ep.case_name}'")
+            log.info("engine.episode_renamed", old=old_name, new=ep.case_name)
         elif evidence.objective and not ep._objective:
             ep._objective = evidence.objective
 
-        print(f"[engine] episode continued: {ep.case_name}")
+        log.debug("engine.episode_continued", episode=ep.case_name)
         return EngineResult(active_episode=ep)
 
     def _handle_transition(self, evidence: ScreenshotEvidence) -> EngineResult:
@@ -222,10 +264,7 @@ class EpisodeEngine:
         self._candidate_name = evidence.suggested_episode_name
         self._consecutive_new_episode = 1
         self._state = "transitioning"
-        print(
-            f"[engine] transitioning: candidate '{self._candidate_name}' "
-            f"(current: '{self.active.case_name}')"
-        )
+        log.info("engine.transitioning", candidate=self._candidate_name, current=self.active.case_name)
         return EngineResult(active_episode=self.active)
 
     def _close_and_open(self, name: str, evidence: ScreenshotEvidence) -> EngineResult:
@@ -247,10 +286,12 @@ class EpisodeEngine:
         self._state = "idle"
         self._consecutive_new_episode = 0
         self._candidate_name = ""
-        print(
-            f"[engine] episode finalized: '{ep.case_name}' "
-            f"({ep.duration_minutes:.0f}min, {len(ep._evidence)} evidence items)"
-            + (f" [{reason}]" if reason else "")
+        log.info(
+            "engine.episode_finalized",
+            episode=ep.case_name,
+            duration_min=round(ep.duration_minutes),
+            evidence_count=len(ep._evidence),
+            reason=reason or "",
         )
         return ep
 

@@ -1,8 +1,11 @@
 """
 Windows implementation of OSAdapter.
-Uses win32gui, psutil, pywinauto, pytesseract, and keyring.
+Uses win32gui, psutil, pytesseract, and keyring.
 All imports are lazy so this file can be imported without triggering import errors
 on systems where the Windows-specific packages aren't installed.
+
+Browser URL extraction uses window title parsing only — pywinauto is not used
+(it requires UIAutomation permissions and can trigger AV false positives).
 """
 import os
 from typing import Optional
@@ -32,18 +35,20 @@ class WindowsAdapter:
             return ''
 
     def get_browser_url(self) -> str:
-        """Best-effort URL from Chrome/Edge via pywinauto accessibility."""
+        """
+        Best-effort URL from the active window title.
+
+        Chrome/Edge/Firefox encode the current URL or page title in the window
+        title. Full URL extraction via accessibility APIs (pywinauto/UIAutomation)
+        is omitted: it requires elevated permissions and trips AV scanners.
+        """
         try:
-            from pywinauto import Desktop
-            for w in Desktop(backend='uia').windows():
-                if w.is_active():
-                    try:
-                        bar = w.child_window(auto_id='omnibox', control_type='Edit')
-                        val = bar.get_value()
-                        if val.startswith('http'):
-                            return val
-                    except Exception:
-                        pass
+            import win32gui
+            title = win32gui.GetWindowText(win32gui.GetForegroundWindow())
+            # Some browsers put the URL in the title when the omnibox is focused;
+            # otherwise return empty string and let OCR/entity extraction handle it.
+            if title.startswith("http://") or title.startswith("https://"):
+                return title.strip()
         except Exception:
             pass
         return ''

@@ -5,6 +5,13 @@ Screenshots are saved selectively — only when they contain meaningful new
 information (app change, URL change, large visual shift, significant new
 OCR content, or periodic coverage gap). This keeps screenshot count low
 and signal quality high for Claude Vision at episode close.
+
+Phase 1 (ENABLE_CAPTURE_LEASES=true): observe() checks ConsentManager before
+recording any observation from a window. Unauthorized windows return None and
+the caller records an ObservationGap.
+
+Phase 2 (ENABLE_APPLESCRIPT_METADATA=false): AppleScript-based URL and document
+path extraction is disabled by default. OCR-based extraction is used instead.
 """
 import shutil
 import time
@@ -18,6 +25,9 @@ import config
 import context as ctx_module
 import entities as entities_mod
 import ocr
+from bh_logging import get_logger
+
+log = get_logger("observer")
 
 # Apps that must never generate Episodes.
 # The agent itself and OS-level UIs are excluded to prevent "BuildHarvey" or
@@ -54,15 +64,52 @@ _last_ocr_len: int = 0
 _last_saved_at: float = 0.0
 
 
-def observe() -> Optional[Observation]:
+def observe(consent_manager=None) -> Optional[Observation]:
     """
     Capture the current screen and return an Observation if something meaningful
     has changed since the previous frame.
 
-    Returns None if the screen is static.
+    Returns None if:
+      - The screen is static (diff below threshold)
+      - The frontmost window is not authorized (when ENABLE_CAPTURE_LEASES=true)
+
+    When ENABLE_CAPTURE_LEASES=true and consent_manager is provided, the window
+    identity is checked against the ConsentManager before any observation is
+    returned. The caller is responsible for recording an ObservationGap when
+    None is returned due to a lack of consent.
+
     Screenshots are saved only when they contain high-value new information.
     """
-    capture.capture_screen(config.TEMP_FRAME_PATH)
+    # ── Phase 1: per-window consent gate ──────────────────────────────────────
+    # CRITICAL: get app identity (no pixels) then check consent BEFORE any
+    # pixel capture. Only after consent passes do we call capture_window().
+    if config.ENABLE_CAPTURE_LEASES and consent_manager is not None:
+        from window_identity import get_window_identity
+        # get_metadata_context() uses only Quartz/AppKit — no AppleScript, no pixels
+        ctx = ctx_module.get_metadata_context()
+        identity = get_window_identity(ctx, consent_manager.session_epoch)
+        if identity is None or not consent_manager.is_authorized(identity):
+            # Window is not authorized — return sentinel without capturing any pixels.
+            # Caller records an ObservationGap.
+            return _CONSENT_BLOCKED
+        # Consent granted — capture ONLY this window's pixels.
+        # capture_window() never falls back to full-monitor; False means the
+        # window could not be captured (closed, minimized, unsupported API).
+        # Treat that as a capture failure → _CONSENT_BLOCKED so the caller
+        # records an ObservationGap rather than silently using full-screen data.
+        window_id = identity.window_id if identity else None
+        if window_id is not None:
+            ok = capture.capture_window(window_id, config.TEMP_FRAME_PATH)
+            if not ok:
+                log.warning("observer.capture_window_failed", window_id=window_id)
+                return _CONSENT_BLOCKED
+        else:
+            # No usable window_id — cannot guarantee HWND isolation, fail closed
+            return _CONSENT_BLOCKED
+    else:
+        # Capture leases disabled — fall back to full-monitor capture
+        capture.capture_screen(config.TEMP_FRAME_PATH)
+        ctx = ctx_module.get_metadata_context()
 
     # Compute diff score once; used for both the "any change" gate and the
     # "large change" screenshot signal.
@@ -72,9 +119,19 @@ def observe() -> Optional[Observation]:
         if diff <= config.DIFF_THRESHOLD:
             return None  # screen is static — nothing to record
 
-    ctx = ctx_module.get_context()
+    # Enrich ctx with AppleScript metadata if enabled
+    if config.ENABLE_APPLESCRIPT_METADATA:
+        ctx = ctx_module.get_context()
+
     text = ocr.extract_text(config.TEMP_FRAME_PATH)
     found_entities = entities_mod.extract(text, ctx.window_title, ctx.file_path)
+
+    # ── Phase 2: AppleScript opt-in ───────────────────────────────────────────
+    # browser_url and file_path are populated by get_context() only when the
+    # ENABLE_APPLESCRIPT_METADATA flag is true. get_metadata_context() returns
+    # empty strings for both, so this assignment is always safe.
+    browser_url = ctx.browser_url
+    file_path = ctx.file_path
 
     # Save screenshot only if this frame represents meaningful new information.
     screenshot_path = _save_screenshot(ctx, text, diff)
@@ -86,11 +143,21 @@ def observe() -> Optional[Observation]:
         timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         app=ctx.app_name,
         window_title=ctx.window_title,
-        browser_url=ctx.browser_url,
-        file_path=ctx.file_path,
+        browser_url=browser_url,
+        file_path=file_path,
         entities=found_entities,
         screenshot_path=screenshot_path,
     )
+
+
+# Sentinel returned when a window is not authorized (consent blocked).
+# Distinct from None (static screen) so the caller can distinguish and
+# create an appropriate ObservationGap.
+class _ConsentBlocked:
+    """Sentinel: observation blocked by consent gate. Not a real Observation."""
+    pass
+
+_CONSENT_BLOCKED = _ConsentBlocked()
 
 
 # ── Screenshot selection ───────────────────────────────────────────────────────
@@ -168,7 +235,7 @@ def _write_screenshot(ctx, text: str) -> Optional[str]:
 
         return str(dest)
     except Exception as e:
-        print(f"[observer] screenshot save failed: {e}")
+        log.error("observer.screenshot_save_failed", error=str(e))
         return None
 
 
@@ -213,4 +280,4 @@ def reset() -> None:
     _last_url_domain = ""
     _last_ocr_len = 0
     _last_saved_at = 0.0
-    print("[observer] state reset after error")
+    log.warning("observer.state_reset")

@@ -44,18 +44,20 @@ type ActivationRow = {
 
 function buildAdminMock({
   activation,
-  upsertDeviceId = DEVICE_ID,
+  existingDevice = null,
+  updateDeviceId = DEVICE_ID,
   insertDeviceId = DEVICE_ID,
-  upsertSpy,
+  updateSpy,
   insertSpy,
 }: {
   activation: ActivationRow | null
-  upsertDeviceId?: string
+  existingDevice?: { id: string } | null
+  updateDeviceId?: string
   insertDeviceId?: string
-  upsertSpy?: ReturnType<typeof vi.fn>
+  updateSpy?: ReturnType<typeof vi.fn>
   insertSpy?: ReturnType<typeof vi.fn>
 }) {
-  const _upsertSpy = upsertSpy ?? vi.fn()
+  const _updateSpy = updateSpy ?? vi.fn()
   const _insertSpy = insertSpy ?? vi.fn()
 
   // device_activations: .select('*').eq().gt().is().single()
@@ -69,12 +71,19 @@ function buildAdminMock({
   const activationUpdateEq = vi.fn().mockResolvedValue({})
   const activationUpdate = vi.fn().mockReturnValue({ eq: activationUpdateEq })
 
-  // devices: .upsert().select('id').single()
-  const upsertSingle = vi.fn().mockResolvedValue({ data: { id: upsertDeviceId }, error: null })
-  const upsertSelect = vi.fn().mockReturnValue({ single: upsertSingle })
-  _upsertSpy.mockReturnValue({ select: upsertSelect })
+  // devices: .select('id').eq('user_id', ...).eq('installation_id', ...).single() — lookup existing
+  const devSelectSingle = vi.fn().mockResolvedValue({ data: existingDevice, error: null })
+  const devSelectEq2 = vi.fn().mockReturnValue({ single: devSelectSingle })
+  const devSelectEq1 = vi.fn().mockReturnValue({ eq: devSelectEq2 })
+  const devSelect = vi.fn().mockReturnValue({ eq: devSelectEq1 })
 
-  // devices: .insert().select('id').single()
+  // devices: .update({...}).eq('id', ...).select('id').single() — reconnect path
+  const updateSingle = vi.fn().mockResolvedValue({ data: { id: updateDeviceId }, error: null })
+  const updateSelect = vi.fn().mockReturnValue({ single: updateSingle })
+  const updateEq = vi.fn().mockReturnValue({ select: updateSelect })
+  _updateSpy.mockReturnValue({ eq: updateEq })
+
+  // devices: .insert({...}).select('id').single() — first activation or legacy
   const insertSingle = vi.fn().mockResolvedValue({ data: { id: insertDeviceId }, error: null })
   const insertSelect = vi.fn().mockReturnValue({ single: insertSingle })
   _insertSpy.mockReturnValue({ select: insertSelect })
@@ -89,7 +98,8 @@ function buildAdminMock({
       }
       if (table === 'devices') {
         return {
-          upsert: _upsertSpy,
+          select: devSelect,
+          update: _updateSpy,
           insert: _insertSpy,
         }
       }
@@ -97,7 +107,7 @@ function buildAdminMock({
     }),
   } as ReturnType<typeof getAdminClient>)
 
-  return { upsertSpy: _upsertSpy, insertSpy: _insertSpy }
+  return { updateSpy: _updateSpy, insertSpy: _insertSpy }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -129,9 +139,9 @@ describe('POST /api/activate/approve', () => {
     expect(res.status).toBe(404)
   })
 
-  it('upserts device when activation has installation_id', async () => {
+  it('inserts device when activation has installation_id and no existing device', async () => {
     mockAuthUser(USER_ID)
-    const { upsertSpy, insertSpy } = buildAdminMock({
+    const { updateSpy, insertSpy } = buildAdminMock({
       activation: {
         id: ACTIVATION_ID,
         token_hash: 'abc123',
@@ -139,43 +149,45 @@ describe('POST /api/activate/approve', () => {
         platform: 'macos',
         installation_id: INSTALLATION_ID,
       },
+      existingDevice: null,
     })
 
     const res = await POST(makeRequest({ activation_id: ACTIVATION_ID }))
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ ok: true })
 
-    // Should have called upsert, not insert
-    expect(upsertSpy).toHaveBeenCalledOnce()
-    expect(insertSpy).not.toHaveBeenCalled()
+    // Select-then-insert path: no existing device → insert, not update
+    expect(insertSpy).toHaveBeenCalledOnce()
+    expect(updateSpy).not.toHaveBeenCalled()
 
-    // Upsert should include the installation_id and clear revoked_at
-    const upsertArg = upsertSpy.mock.calls[0][0]
-    expect(upsertArg.installation_id).toBe(INSTALLATION_ID)
-    expect(upsertArg.user_id).toBe(USER_ID)
-    expect(upsertArg.revoked_at).toBeNull()
+    // Insert must include installation_id and user_id
+    const insertArg = insertSpy.mock.calls[0][0]
+    expect(insertArg.installation_id).toBe(INSTALLATION_ID)
+    expect(insertArg.user_id).toBe(USER_ID)
   })
 
-  it('clears revoked_at when upserting existing device on reconnect', async () => {
+  it('clears revoked_at when updating existing device on reconnect', async () => {
     mockAuthUser(USER_ID)
-    const { upsertSpy } = buildAdminMock({
+    const { updateSpy } = buildAdminMock({
       activation: {
         id: ACTIVATION_ID,
         token_hash: 'newhash',
         platform: 'macos',
         installation_id: INSTALLATION_ID,
       },
+      existingDevice: { id: DEVICE_ID },
     })
 
     await POST(makeRequest({ activation_id: ACTIVATION_ID }))
 
-    const upsertArg = upsertSpy.mock.calls[0][0]
-    expect(upsertArg.revoked_at).toBeNull()
+    // Existing device found → update path, must clear revoked_at
+    const updateArg = updateSpy.mock.calls[0][0]
+    expect(updateArg.revoked_at).toBeNull()
   })
 
   it('inserts device (legacy) when activation has no installation_id', async () => {
     mockAuthUser(USER_ID)
-    const { upsertSpy, insertSpy } = buildAdminMock({
+    const { updateSpy, insertSpy } = buildAdminMock({
       activation: {
         id: ACTIVATION_ID,
         token_hash: 'abc123',
@@ -188,46 +200,48 @@ describe('POST /api/activate/approve', () => {
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ ok: true })
 
-    // Should have called insert, not upsert
+    // Legacy path (no installation_id) → plain insert, no select/update
     expect(insertSpy).toHaveBeenCalledOnce()
-    expect(upsertSpy).not.toHaveBeenCalled()
+    expect(updateSpy).not.toHaveBeenCalled()
   })
 
-  it('two activations with different installation_ids call upsert twice independently', async () => {
+  it('two new activations with different installation_ids insert independently', async () => {
     mockAuthUser(USER_ID)
     const INSTALLATION_ID_2 = 'b2c3d4e5-f6a7-8901-bcde-f12345678901'
 
-    // First activation
-    const { upsertSpy } = buildAdminMock({
+    // First activation — no existing device
+    const { insertSpy } = buildAdminMock({
       activation: {
         id: 'act-1',
         token_hash: 'hash1',
         platform: 'macos',
         installation_id: INSTALLATION_ID,
       },
+      existingDevice: null,
     })
     const res1 = await POST(makeRequest({ activation_id: 'act-1' }))
     expect(res1.status).toBe(200)
-    const firstArg = upsertSpy.mock.calls[0][0]
+    const firstArg = insertSpy.mock.calls[0][0]
     expect(firstArg.installation_id).toBe(INSTALLATION_ID)
 
     vi.clearAllMocks()
 
-    // Second activation with different installation_id
-    const { upsertSpy: upsertSpy2 } = buildAdminMock({
+    // Second activation with different installation_id — also no existing device
+    const { insertSpy: insertSpy2 } = buildAdminMock({
       activation: {
         id: 'act-2',
         token_hash: 'hash2',
         platform: 'macos',
         installation_id: INSTALLATION_ID_2,
       },
+      existingDevice: null,
     })
     mockAuthUser(USER_ID)
     const res2 = await POST(makeRequest({ activation_id: 'act-2' }))
     expect(res2.status).toBe(200)
-    const secondArg = upsertSpy2.mock.calls[0][0]
+    const secondArg = insertSpy2.mock.calls[0][0]
     expect(secondArg.installation_id).toBe(INSTALLATION_ID_2)
-    // Different installation_ids → different upsert calls
+    // Different installation_ids → separate insert calls
     expect(firstArg.installation_id).not.toBe(secondArg.installation_id)
   })
 })
